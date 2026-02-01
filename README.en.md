@@ -118,6 +118,19 @@ curl -X POST "https://your-domain/wecom/app/push" \
 
 Media (file/image/voice/video): use `mediaUrl` or `mediaBase64`. You can also send text together.
 
+## Unified outbound (OpenClaw console)
+Send messages proactively from the OpenClaw console/CLI (no inbound message required).
+
+- **App mode only** (requires `corpId/corpSecret/agentId`)
+- DM: `--to <userid>` or `--to wecom:<userid>`
+- Group: `--to chat:<chatId>` or `--to group:<chatId>`
+
+Examples:
+```bash
+openclaw send --channel wecom --to WenShuJun "Hello"
+openclaw send --channel wecom --to chat:CHAT_ID "Group test"
+```
+
 ## Media auto recognition (optional)
 - **Voice send/receive does NOT require API**; only auto transcription needs an OpenAI-compatible API
 - **Video recognition requires ffmpeg** (install on server, then set `media.auto.video.enabled = true`)

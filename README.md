@@ -120,6 +120,19 @@ curl -X POST "https://你的域名/wecom/app/push" \
 
 发送媒体（file/image/voice/video）：支持 `mediaUrl` 或 `mediaBase64`，可与 `text` 同时发送。
 
+## 统一出站（OpenClaw 控制台）
+用于在 OpenClaw 控制台/CLI 主动发送消息（不依赖用户先发消息）。
+
+- **仅支持 App 模式**（必须配置 `corpId/corpSecret/agentId`）
+- 发送私聊：`--to <userid>` 或 `--to wecom:<userid>`
+- 发送群聊：`--to chat:<chatId>` 或 `--to group:<chatId>`
+
+示例：
+```bash
+openclaw send --channel wecom --to WenShuJun "你好"
+openclaw send --channel wecom --to chat:CHAT_ID "群消息测试"
+```
+
 ## 多媒体自动识别（可选）
 - **语音收发不需要 API**，只有开启“语音自动转写”才需要 OpenAI 兼容接口
 - **视频识别需要 ffmpeg**（服务器已安装后，将 `media.auto.video.enabled` 设为 `true`）

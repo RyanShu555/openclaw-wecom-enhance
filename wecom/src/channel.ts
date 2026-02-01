@@ -129,13 +129,70 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
     deliveryMode: "direct",
     chunkerMode: "text",
     textChunkLimit: 20480,
-    sendText: async () => {
-      return {
-        channel: "wecom",
-        ok: false,
-        messageId: "",
-        error: new Error("WeCom outbound sendText not wired yet (skeleton)."),
-      };
+    sendText: async ({ cfg, to, text, accountId }) => {
+      try {
+        const resolvedAccount = accountId ?? DEFAULT_ACCOUNT_ID;
+        const account = resolveWecomAccount({ cfg: cfg as ClawdbotConfig, accountId: resolvedAccount });
+        let target = typeof to === "string" ? to.trim() : "";
+        if (target.toLowerCase().startsWith("wecom:")) {
+          target = target.slice("wecom:".length).trim();
+        }
+        if (!target) {
+          return {
+            channel: "wecom",
+            ok: false,
+            messageId: "",
+            error: new Error("WeCom outbound requires --to <userid|chatid>."),
+          };
+        }
+        if (!account.corpId || !account.corpSecret || !account.agentId) {
+          return {
+            channel: "wecom",
+            ok: false,
+            messageId: "",
+            error: new Error("WeCom app outbound requires corpId/corpSecret/agentId (App mode)."),
+          };
+        }
+        const { sendWecomText } = await import("./wecom-api.js");
+        const lower = target.toLowerCase();
+        const chatPrefixes = ["chat:", "chatid:", "group:"];
+        const matchedPrefix = chatPrefixes.find((prefix) => lower.startsWith(prefix));
+        if (matchedPrefix) {
+          const chatId = target.slice(matchedPrefix.length).trim();
+          if (!chatId) {
+            return {
+              channel: "wecom",
+              ok: false,
+              messageId: "",
+              error: new Error("WeCom outbound requires chatId after chat:/chatid:/group: prefix."),
+            };
+          }
+          await sendWecomText({
+            account,
+            toUser: "",
+            chatId,
+            text: String(text ?? ""),
+          });
+        } else {
+          await sendWecomText({
+            account,
+            toUser: target,
+            text: String(text ?? ""),
+          });
+        }
+        return {
+          channel: "wecom",
+          ok: true,
+          messageId: "",
+        };
+      } catch (err) {
+        return {
+          channel: "wecom",
+          ok: false,
+          messageId: "",
+          error: err instanceof Error ? err : new Error(String(err)),
+        };
+      }
     },
   },
   status: {

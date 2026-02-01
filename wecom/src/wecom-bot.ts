@@ -439,16 +439,25 @@ async function startAgentForStream(params: {
               const isSingleChat = chatType !== "group";
               const responseUrl = current.responseUrl;
               if (isSingleChat && responseUrl) {
-                await fetch(responseUrl, {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ msgtype: "template_card", template_card: parsed.template_card }),
-                });
-                current.finished = true;
-                current.content = current.content || "[已发送交互卡片]";
-                current.updatedAt = Date.now();
-                target.statusSink?.({ lastOutboundAt: Date.now() });
-                return;
+                try {
+                  const res = await fetch(responseUrl, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ msgtype: "template_card", template_card: parsed.template_card }),
+                  });
+                  if (!res.ok) {
+                    throw new Error(`response_url status ${res.status}`);
+                  }
+                  current.finished = true;
+                  current.content = current.content || "[已发送交互卡片]";
+                  current.updatedAt = Date.now();
+                  target.statusSink?.({ lastOutboundAt: Date.now() });
+                  return;
+                } catch (err) {
+                  target.runtime.error?.(
+                    `[${account.accountId}] wecom bot template_card send failed: ${String(err)}`,
+                  );
+                }
               }
               const cardTitle = (parsed.template_card as any)?.main_title?.title || "交互卡片";
               const cardDesc = (parsed.template_card as any)?.main_title?.desc || "";
@@ -988,8 +997,14 @@ function resolveOutboundMediaSpec(payload: any): {
   const type = pickString(payload.mediaType, mediaBlock?.type, mediaBlock?.mediaType);
   const filename = pickString(payload.filename, payload.fileName, mediaBlock?.filename, mediaBlock?.fileName, mediaBlock?.name);
   const mimeType = pickString(payload.mimeType, payload.mediaMimeType, mediaBlock?.mimeType, mediaBlock?.contentType);
-  if (!url && !path && !base64) return null;
-  return { type, url, path, base64, filename, mimeType };
+  let finalUrl = url;
+  let finalPath = path;
+  if (!finalPath && finalUrl && (finalUrl.startsWith("/") || finalUrl.startsWith("file://"))) {
+    finalPath = finalUrl;
+    finalUrl = "";
+  }
+  if (!finalUrl && !finalPath && !base64) return null;
+  return { type, url: finalUrl, path: finalPath, base64, filename, mimeType };
 }
 
 async function loadOutboundMedia(params: {

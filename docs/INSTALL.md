@@ -126,6 +126,7 @@ openclaw gateway restart
 ### 字段说明
 - Bot 模式 `receiveId`：建议填写 **Bot ID（aibotid）**，用于回调加解密校验；不填也可通过，但会降低校验严格性。
 - App 模式回调解密使用 **CorpID**（即 `corpId`），与 Bot 模式的 `receiveId` 无关。
+- **Bot 仅配置时**：可收图片/文件（URL 解密），但**出站媒体仍需 App 凭据**（corpId/corpSecret/agentId）。
 
 ## 高级能力（可选）
 ### /sendfile（文件与文件夹）
@@ -152,6 +153,11 @@ openclaw gateway restart
 ```bash
 sudo apt-get update && sudo apt-get install -y ffmpeg
 ```
+macOS：
+```bash
+brew install ffmpeg
+```
+Windows：安装 ffmpeg 并确保 `ffmpeg.exe` 在 PATH 中。
 
 ### 发送队列与操作日志
 - `sendQueue.intervalMs`：/sendfile 多文件发送间隔
@@ -160,6 +166,7 @@ sudo apt-get update && sudo apt-get install -y ffmpeg
 ## Webhook 验证
 - Bot 模式与 App 模式都要求公网 HTTPS。
 - 在企业微信后台配置回调 URL。
+- 需要将公网 HTTPS 反代到 OpenClaw gateway 端口（默认 18789）。
 - 建议 Bot 与 App 使用不同 `webhookPath`，便于排障与避免回调混淆。
 
 ## 主动推送（App 模式）
@@ -179,6 +186,22 @@ curl -X POST "https://你的域名/wecom/app/push" \
 ```
 
 媒体发送（file/image/voice/video）：使用 `mediaUrl` 或 `mediaBase64`，可与 `text` 同时发送。
+
+## 统一出站（OpenClaw 控制台）
+用于在 OpenClaw 控制台/CLI 主动发送消息（不依赖用户先发消息）。
+
+- **仅支持 App 模式**（必须配置 `corpId/corpSecret/agentId`）
+- 发送私聊：`--to <userid>` 或 `--to wecom:<userid>`
+- 发送群聊：`--to chat:<chatId>` 或 `--to group:<chatId>`
+
+示例：
+```bash
+openclaw send --channel wecom --to WenShuJun "你好"
+openclaw send --channel wecom --to chat:CHAT_ID "群消息测试"
+```
+
+## 配置格式提示
+示例使用 JSON5（允许注释）。如你的 OpenClaw 版本只支持严格 JSON，请去掉注释与多余逗号。
 
 ## 常见问题
 - 回调验证失败：检查 Token / AESKey / URL 是否一致

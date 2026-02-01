@@ -18,6 +18,17 @@
 ## 0.1.32 - 2026-02-01
 - Docs: clarify video recognition is verified in App mode; Bot mode requires extra config.
 
+## 0.1.35 - 2026-02-01
+- Bot outbound media: treat local file paths provided via mediaUrl as file path (parity with App).
+- Bot template_card send: handle response_url failures with fallback logging instead of breaking reply flow.
+
+## 0.1.36 - 2026-02-01
+- Add unified outbound sendText (OpenClaw console) via App API (corpId/corpSecret/agentId required).
+
+## 0.1.37 - 2026-02-01
+- Unified outbound: support chatId targets via chat:/group: prefixes; document console usage.
+- Docs: clarify bot outbound media requires App creds; add reverse proxy note and ffmpeg install for macOS/Windows.
+
 ## 0.1.30 - 2026-01-31
 - Bot inbound image/file: decrypt URL media with encodingAESKey (no app creds needed).
 - Bot A2UI template_card: send card via response_url in single chat, fallback to text.
@@ -109,4 +120,3 @@
 - App mode (XML callbacks + ACK + proactive send).
 - Multi-account support and media handling (text/image/voice/video/file).
 - Configuration templates and bilingual README.
-
