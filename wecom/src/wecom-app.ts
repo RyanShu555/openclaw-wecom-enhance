@@ -112,12 +112,43 @@ function prunePendingLists(): void {
 function extractFilenameCandidates(text: string): string[] {
   const candidates = new Set<string>();
   const normalized = text.replace(/[，,；;|]/g, " ");
-  const regex = /(?:\/|file:\/\/)?[A-Za-z0-9._-]+\.[A-Za-z0-9]{1,8}/g;
+  // 匹配带扩展名的文件名
+  const regex = /(?:\/|file:\/\/)?[A-Za-z0-9\u4e00-\u9fa5._-]+\.[A-Za-z0-9]{1,8}/g;
   for (const match of normalized.matchAll(regex)) {
     const value = match[0];
     if (value) candidates.add(value.replace(/^file:\/\//, ""));
   }
   return Array.from(candidates);
+}
+
+/** 从自然语言中提取搜索关键词 */
+function extractSearchKeywords(text: string): string[] {
+  const keywords = new Set<string>();
+  // 移除常见的动词和介词
+  const cleaned = text
+    .replace(/(发给我|发送给我|发我|给我|把|那个|这个|文件|帮我|找|搜索|查找)/g, " ")
+    .replace(/[，,；;|。！？\s]+/g, " ")
+    .trim();
+
+  // 提取中文词汇（2-10个字符）
+  const chineseWords = cleaned.match(/[\u4e00-\u9fa5]{2,10}/g) || [];
+  for (const word of chineseWords) {
+    if (word.length >= 2) keywords.add(word);
+  }
+
+  // 提取英文词汇（2个以上字符）
+  const englishWords = cleaned.match(/[A-Za-z][A-Za-z0-9_-]{1,}/g) || [];
+  for (const word of englishWords) {
+    keywords.add(word.toLowerCase());
+  }
+
+  // 提取数字序列（可能是日期、版本号等）
+  const numbers = cleaned.match(/\d{2,}/g) || [];
+  for (const num of numbers) {
+    keywords.add(num);
+  }
+
+  return Array.from(keywords);
 }
 
 function extractExtension(text: string): string | null {
@@ -135,33 +166,119 @@ function extractExtension(text: string): string | null {
   return allowed.has(ext) ? ext : null;
 }
 
-function resolveSearchDirs(text: string, target: WecomWebhookTarget): { path: string; label: string }[] {
+function resolveSearchDirs(text: string, target: WecomWebhookTarget): { path: string; label: string; recursive?: boolean }[] {
   const lower = text.toLowerCase();
   // 如果明确指定了目录，只搜索该目录
-  if (text.includes("桌面")) return [{ path: join(homedir(), "Desktop"), label: "桌面" }];
-  if (text.includes("下载") || lower.includes("download")) return [{ path: join(homedir(), "Downloads"), label: "下载" }];
-  if (text.includes("临时") || lower.includes("tmp")) return [{ path: resolveMediaTempDir(target), label: "临时目录" }];
+  if (text.includes("桌面")) return [{ path: join(homedir(), "Desktop"), label: "桌面", recursive: true }];
+  if (text.includes("下载") || lower.includes("download")) return [{ path: join(homedir(), "Downloads"), label: "下载", recursive: true }];
+  if (text.includes("文档") || lower.includes("document")) return [{ path: join(homedir(), "Documents"), label: "文档", recursive: true }];
+  if (text.includes("临时") || lower.includes("tmp")) return [{ path: resolveMediaTempDir(target), label: "临时目录", recursive: true }];
+  if (text.includes("工作") || lower.includes("work")) {
+    const workspace = target.account.config.workspace;
+    if (workspace) {
+      const resolved = workspace.startsWith("~") ? join(homedir(), workspace.slice(1)) : workspace;
+      return [{ path: resolved, label: "工作目录", recursive: true }];
+    }
+  }
 
   // 没有明确指定目录时，搜索多个常见目录
-  const dirs: { path: string; label: string }[] = [];
+  const dirs: { path: string; label: string; recursive?: boolean }[] = [];
 
   // 1. 配置的 searchPaths
   const configPaths = target.account.config.media?.searchPaths;
   if (configPaths && Array.isArray(configPaths)) {
     for (const p of configPaths) {
       const resolved = p.startsWith("~") ? join(homedir(), p.slice(1)) : p;
-      dirs.push({ path: resolved, label: basename(resolved) || p });
+      dirs.push({ path: resolved, label: basename(resolved) || p, recursive: true });
     }
   }
 
   // 2. 默认搜索目录（如果没有配置 searchPaths）
   if (dirs.length === 0) {
-    dirs.push({ path: join(homedir(), "Desktop"), label: "桌面" });
-    dirs.push({ path: join(homedir(), "Downloads"), label: "下载" });
-    dirs.push({ path: resolveMediaTempDir(target), label: "临时目录" });
+    dirs.push({ path: join(homedir(), "Desktop"), label: "桌面", recursive: true });
+    dirs.push({ path: join(homedir(), "Downloads"), label: "下载", recursive: true });
+    dirs.push({ path: join(homedir(), "Documents"), label: "文档", recursive: false }); // 文档目录默认不递归（可能很大）
+    dirs.push({ path: resolveMediaTempDir(target), label: "临时目录", recursive: true });
   }
 
   return dirs;
+}
+
+/** 递归读取目录中的文件（带深度限制） */
+async function readdirRecursive(
+  dir: string,
+  maxDepth: number = 3,
+  currentDepth: number = 0
+): Promise<{ name: string; path: string; relativePath: string }[]> {
+  const results: { name: string; path: string; relativePath: string }[] = [];
+  if (currentDepth > maxDepth) return results;
+
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      // 跳过隐藏文件和常见的忽略目录
+      if (entry.name.startsWith(".")) continue;
+      if (["node_modules", "__pycache__", ".git", ".svn", "vendor"].includes(entry.name)) continue;
+
+      const fullPath = join(dir, entry.name);
+      if (entry.isFile()) {
+        results.push({
+          name: entry.name,
+          path: fullPath,
+          relativePath: entry.name,
+        });
+      } else if (entry.isDirectory() && currentDepth < maxDepth) {
+        const subResults = await readdirRecursive(fullPath, maxDepth, currentDepth + 1);
+        for (const sub of subResults) {
+          results.push({
+            name: sub.name,
+            path: sub.path,
+            relativePath: join(entry.name, sub.relativePath),
+          });
+        }
+      }
+    }
+  } catch {
+    // ignore directory read errors
+  }
+  return results;
+}
+
+/** 模糊匹配文件名 */
+function fuzzyMatchFile(
+  filename: string,
+  keywords: string[],
+  exactNames: string[]
+): { score: number; matchType: "exact" | "fuzzy" | "none" } {
+  const lowerFilename = filename.toLowerCase();
+  const nameWithoutExt = lowerFilename.replace(/\.[^.]+$/, "");
+
+  // 精确匹配（完整文件名）
+  for (const exact of exactNames) {
+    if (lowerFilename === exact.toLowerCase()) {
+      return { score: 100, matchType: "exact" };
+    }
+  }
+
+  // 关键词匹配
+  let matchedKeywords = 0;
+  let totalScore = 0;
+  for (const keyword of keywords) {
+    const lowerKeyword = keyword.toLowerCase();
+    if (lowerFilename.includes(lowerKeyword) || nameWithoutExt.includes(lowerKeyword)) {
+      matchedKeywords++;
+      // 关键词越长，匹配分数越高
+      totalScore += Math.min(keyword.length * 10, 50);
+    }
+  }
+
+  if (matchedKeywords > 0) {
+    // 匹配的关键词越多，分数越高
+    totalScore += matchedKeywords * 20;
+    return { score: Math.min(totalScore, 90), matchType: "fuzzy" };
+  }
+
+  return { score: 0, matchType: "none" };
 }
 
 function parseSelection(text: string, items: { name: string; path: string }[]): { name: string; path: string }[] | null {
@@ -245,20 +362,36 @@ async function tryHandleNaturalFileSend(params: {
   }
 
   if (!/(发给我|发送给我|发我|给我)/.test(text)) return false;
-  const names = extractFilenameCandidates(text);
+  const exactNames = extractFilenameCandidates(text);
+  const keywords = extractSearchKeywords(text);
   const ext = extractExtension(text);
-  if (names.length === 0 && !ext) return false;
 
-  // 搜索多个目录
+  // 如果没有任何搜索条件，返回
+  if (exactNames.length === 0 && keywords.length === 0 && !ext) return false;
+
+  // 搜索多个目录（支持递归）
   const searchDirs = resolveSearchDirs(text, target);
-  const allEntries: Map<string, { name: string; path: string; dir: string }> = new Map();
+  const allEntries: Map<string, { name: string; path: string; dir: string; score: number }> = new Map();
 
   for (const searchDir of searchDirs) {
     try {
-      const entries = await readdir(searchDir.path);
+      const maxDepth = searchDir.recursive ? 3 : 0;
+      const entries = await readdirRecursive(searchDir.path, maxDepth);
       for (const entry of entries) {
-        if (!allEntries.has(entry)) {
-          allEntries.set(entry, { name: entry, path: join(searchDir.path, entry), dir: searchDir.label });
+        const { score, matchType } = fuzzyMatchFile(entry.name, keywords, exactNames);
+        // 只保留有匹配的文件，或者按扩展名搜索时匹配扩展名的文件
+        const matchesExt = ext && entry.name.toLowerCase().endsWith(`.${ext}`);
+        if (score > 0 || matchesExt) {
+          const finalScore = matchesExt ? Math.max(score, 50) : score;
+          const existing = allEntries.get(entry.path);
+          if (!existing || existing.score < finalScore) {
+            allEntries.set(entry.path, {
+              name: entry.relativePath,
+              path: entry.path,
+              dir: searchDir.label,
+              score: finalScore,
+            });
+          }
         }
       }
     } catch {
@@ -266,71 +399,58 @@ async function tryHandleNaturalFileSend(params: {
     }
   }
 
+  // 按匹配分数排序
+  const sortedEntries = Array.from(allEntries.values())
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 100); // 最多返回100个结果
+
   const resolved: { name: string; path: string }[] = [];
-  const missing: string[] = [];
   let foundInDir = "";
 
-  if (names.length > 0) {
-    for (const name of names) {
-      let fullPath = "";
-      if (name.startsWith("/")) {
-        fullPath = name;
-      } else {
-        const entry = allEntries.get(name);
-        if (entry) {
-          fullPath = entry.path;
-          foundInDir = entry.dir;
-        }
-      }
-      if (!fullPath) {
-        missing.push(name);
-        continue;
-      }
+  // 如果有精确文件名，优先处理绝对路径
+  for (const name of exactNames) {
+    if (name.startsWith("/")) {
       try {
-        const info = await stat(fullPath);
+        const info = await stat(name);
         if (info.isFile()) {
-          resolved.push({ name: basename(fullPath), path: fullPath });
-        } else {
-          missing.push(name);
+          resolved.push({ name: basename(name), path: name });
         }
-      } catch {
-        missing.push(name);
-      }
-    }
-  } else if (ext) {
-    // 按扩展名搜索时，只在第一个有匹配的目录中搜索
-    for (const searchDir of searchDirs) {
-      try {
-        const entries = await readdir(searchDir.path);
-        for (const entry of entries) {
-          if (!entry.toLowerCase().endsWith(`.${ext}`)) continue;
-          const fullPath = join(searchDir.path, entry);
-          try {
-            const info = await stat(fullPath);
-            if (info.isFile()) {
-              resolved.push({ name: entry, path: fullPath });
-              foundInDir = searchDir.label;
-            }
-          } catch {
-            // ignore
-          }
-        }
-        if (resolved.length > 0) break; // 找到匹配后停止搜索其他目录
       } catch {
         // ignore
       }
     }
   }
 
+  // 添加模糊匹配的结果
+  for (const entry of sortedEntries) {
+    if (!resolved.some(r => r.path === entry.path)) {
+      resolved.push({ name: entry.name, path: entry.path });
+      if (!foundInDir) foundInDir = entry.dir;
+    }
+  }
+
   if (resolved.length === 0) {
-    const allFiles = Array.from(allEntries.values()).slice(0, 5).map(e => e.name);
-    const hint = allFiles.length ? `可用文件示例：${allFiles.join(", ")}` : "搜索目录中无可用文件";
+    // 没有找到匹配的文件，列出搜索目录中的一些文件作为提示
+    const sampleFiles: string[] = [];
+    for (const searchDir of searchDirs) {
+      try {
+        const entries = await readdir(searchDir.path);
+        for (const entry of entries.slice(0, 3)) {
+          if (!entry.startsWith(".")) sampleFiles.push(entry);
+        }
+        if (sampleFiles.length >= 5) break;
+      } catch {
+        // ignore
+      }
+    }
+    const hint = sampleFiles.length ? `可用文件示例：${sampleFiles.join(", ")}` : "搜索目录中无可用文件";
     const searchedDirs = searchDirs.map(d => d.label).join("、");
+    const searchTerms = [...exactNames, ...keywords].filter(Boolean).join("、") || "(无)";
     await sendWecomText({
       account: target.account,
       toUser: fromUser,
       chatId: isGroup ? chatId : undefined,
-      text: `未找到指定文件：${missing.join(", ")}。\n已搜索：${searchedDirs}\n${hint}`,
+      text: `未找到匹配的文件。\n搜索关键词：${searchTerms}\n已搜索：${searchedDirs}\n${hint}`,
     });
     return true;
   }

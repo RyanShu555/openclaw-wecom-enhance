@@ -3,41 +3,11 @@
   // OpenClaw 工具权限配置（Agent 执行命令所需）
   // ============================================================
   "tools": {
-    "profile": "full",                    // 工具配置文件: "full" 表示完整权限
-    "allow": ["*"],                       // 允许的工具列表: ["*"] 表示全部
     "elevated": {
       "enabled": true,                    // 是否启用提升权限
       "allowFrom": {
-        "webchat": ["*"]                  // 允许来源: webchat 渠道的所有用户
-      }
-    },
-    "exec": {
-      "host": "gateway",                  // 执行主机: gateway
-      "security": "full",                 // 安全级别: "full" 表示完全信任
-      "ask": "off"                        // 执行前是否询问: "off" 表示不询问
-    }
-  },
-
-  // ============================================================
-  // 命令配置
-  // ============================================================
-  "commands": {
-    "native": "auto",                     // 原生命令: "auto" 自动检测
-    "nativeSkills": "auto",               // 原生技能: "auto" 自动检测
-    "bash": true,                         // 是否允许 bash 命令
-    "useAccessGroups": false              // 是否使用访问组
-  },
-
-  // ============================================================
-  // Agent 默认配置
-  // ============================================================
-  "agents": {
-    "defaults": {
-      "workspace": "~/.openclaw/workspace",   // Agent 工作目录
-      "elevatedDefault": "full",              // 默认提升权限级别
-      "sandbox": {
-        "mode": "off",                        // 沙箱模式: "off" 关闭沙箱
-        "workspaceAccess": "rw"               // 工作目录访问权限: 读写
+        "wecom": ["*"]                    // 允许来源: wecom 渠道的所有用户
+        // 生产环境可限制为特定用户: ["user_id_1", "user_id_2"]
       }
     }
   },
@@ -58,6 +28,13 @@
         "retentionHours": 72,                 // 媒体保留时间（小时）
         "cleanupOnStart": true,               // 启动时是否清理过期媒体
         "maxBytes": 10485760,                 // 媒体最大字节数（10MB）
+
+        // 文件搜索目录（自然语言发送文件时搜索的目录）
+        "searchPaths": [
+          "~/Desktop",                        // 桌面
+          "~/Downloads",                      // 下载
+          "~/Documents"                       // 文档
+        ],
 
         // 图片识别配置（可选，需要 OpenAI 兼容 API）
         "vision": {

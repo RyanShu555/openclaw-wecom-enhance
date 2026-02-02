@@ -137,8 +137,49 @@ brew install ffmpeg
 /sendfile /tmp/openclaw-wecom /home/user/report.pdf
 ```
 - 支持目录：自动打包为 zip 后发送
-- 支持自然语言：`把这个文件发给我 image-xxx.jpg`
-- 搜索范围关键词：`桌面` → `~/Desktop`，`下载` → `~/Downloads`
+
+### 自然语言文件发送（App 模式）
+
+支持用自然语言描述要发送的文件：
+```
+把那个报告发给我
+把桌面的 pdf 文件发给我
+发我下载目录里的截图
+```
+
+**智能搜索特性**：
+
+- **模糊匹配**：文件名包含关键词即可匹配（如"报告"可匹配 `月度报告.pdf`）
+- **递归搜索**：自动搜索子目录（最深3层）
+- **多目录搜索**：同时搜索桌面、下载、文档、临时目录
+- **智能排序**：按匹配度排序，最相关的文件排在前面
+
+**搜索目录关键词**：
+
+| 关键词 | 搜索目录 |
+|--------|----------|
+| `桌面` | `~/Desktop` |
+| `下载`、`download` | `~/Downloads` |
+| `文档`、`document` | `~/Documents` |
+| `临时`、`tmp` | 配置的临时目录 |
+| `工作`、`work` | 配置的工作目录 |
+
+**自定义搜索目录**：在配置中添加 `media.searchPaths`：
+```json
+{
+  "channels": {
+    "wecom": {
+      "accounts": {
+        "app": {
+          "media": {
+            "searchPaths": ["~/Projects", "/data/files"]
+          }
+        }
+      }
+    }
+  }
+}
+```
 
 ### Agent 文件收发（App 模式）
 让 Agent 通过 `message` 工具主动发送文件（如"把桌面的文件发给我"）。
@@ -183,61 +224,33 @@ openclaw send --channel wecom --to chat:CHAT_ID "群消息测试"
 
 ## OpenClaw 工具权限配置
 
-如果希望 Agent 能够执行本地命令（如查看文件、运行脚本等），需要配置工具权限。
-
-### 1. 添加 tools 配置
+如果希望 Agent 能够执行本地命令（如查看文件、运行脚本等），需要启用 elevated 权限。
 
 在 `~/.openclaw/openclaw.json` 中添加：
 
 ```json
 {
   "tools": {
-    "profile": "full",
-    "allow": ["*"],
     "elevated": {
       "enabled": true,
-      "allowFrom": { "webchat": ["*"] }
-    },
-    "exec": {
-      "host": "gateway",
-      "security": "full",
-      "ask": "off"
-    }
-  },
-  "commands": {
-    "native": "auto",
-    "nativeSkills": "auto",
-    "bash": true,
-    "useAccessGroups": false
-  },
-  "agents": {
-    "defaults": {
-      "workspace": "~/.openclaw/workspace",
-      "elevatedDefault": "full",
-      "sandbox": { "mode": "off", "workspaceAccess": "rw" }
+      "allowFrom": {
+        "wecom": ["*"]
+      }
     }
   }
 }
 ```
 
-### 2. 添加命令执行白名单
+> **说明**：`"*"` 表示允许所有用户使用提权功能。生产环境可限制为特定用户 ID：`["user_id_1", "user_id_2"]`
 
-```bash
-openclaw approvals allowlist add --agent '*' '*'
-```
-
-> **安全提示**：上述配置给予 Agent 完全的命令执行权限。生产环境建议限制允许的命令范围。
-
-### 3. 重启 Gateway
-
+配置完成后重启 Gateway：
 ```bash
 openclaw gateway restart
 ```
 
-### 验证配置
+验证配置（在企业微信中发送）：
 
-在企业微信中发送测试：
-- "帮我看下桌面有什么文件"
+- "帮我看下当前目录有什么文件"
 - "运行 ls -la 命令"
 
 ## 常见问题

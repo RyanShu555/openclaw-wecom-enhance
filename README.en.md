@@ -132,22 +132,67 @@ brew install ffmpeg
 ## File Sending
 
 ### /sendfile Command (App Mode)
+
 Send server files, supports multiple absolute paths:
 ```
 /sendfile /tmp/openclaw-wecom /home/user/report.pdf
 ```
 - Directories: auto-zipped before sending
-- Natural language: `send me this file image-xxx.jpg`
-- Search scope keywords: `桌面` → `~/Desktop`, `下载` → `~/Downloads`
+
+### Natural Language File Sending (App Mode)
+
+Send files using natural language:
+```
+send me that report
+send me the pdf files on desktop
+send me the screenshots in downloads
+```
+
+**Smart Search Features**:
+
+- **Fuzzy matching**: Files are matched if their name contains keywords (e.g., "report" matches `monthly-report.pdf`)
+- **Recursive search**: Automatically searches subdirectories (up to 3 levels deep)
+- **Multi-directory search**: Searches Desktop, Downloads, Documents, and temp directories simultaneously
+- **Smart sorting**: Results sorted by relevance, most relevant files first
+
+**Search Directory Keywords**:
+
+| Keyword | Search Directory |
+|---------|------------------|
+| `桌面` (desktop) | `~/Desktop` |
+| `下载`, `download` | `~/Downloads` |
+| `文档`, `document` | `~/Documents` |
+| `临时`, `tmp` | Configured temp directory |
+| `工作`, `work` | Configured workspace |
+
+**Custom Search Directories**: Add `media.searchPaths` in config:
+```json
+{
+  "channels": {
+    "wecom": {
+      "accounts": {
+        "app": {
+          "media": {
+            "searchPaths": ["~/Projects", "/data/files"]
+          }
+        }
+      }
+    }
+  }
+}
+```
 
 ### Agent File Send/Receive (App Mode)
+
 Let Agent send files via `message` tool (e.g., "send me the file on desktop").
 
 **Prerequisites**:
+
 1. App mode credentials must be configured
 2. Tool permissions enabled (see "OpenClaw Tool Permissions" below)
 
 **Supported Media Types**:
+
 | Type | Extensions | Size Limit |
 |------|------------|------------|
 | Image | `.jpg` `.jpeg` `.png` `.gif` `.bmp` `.webp` | 10MB |
@@ -183,61 +228,33 @@ openclaw send --channel wecom --to chat:CHAT_ID "Group test"
 
 ## OpenClaw Tool Permissions
 
-To allow Agent to execute local commands (view files, run scripts, etc.), configure tool permissions.
-
-### 1. Add tools config
+To allow Agent to execute local commands (view files, run scripts, etc.), enable elevated permissions.
 
 Add to `~/.openclaw/openclaw.json`:
 
 ```json
 {
   "tools": {
-    "profile": "full",
-    "allow": ["*"],
     "elevated": {
       "enabled": true,
-      "allowFrom": { "webchat": ["*"] }
-    },
-    "exec": {
-      "host": "gateway",
-      "security": "full",
-      "ask": "off"
-    }
-  },
-  "commands": {
-    "native": "auto",
-    "nativeSkills": "auto",
-    "bash": true,
-    "useAccessGroups": false
-  },
-  "agents": {
-    "defaults": {
-      "workspace": "~/.openclaw/workspace",
-      "elevatedDefault": "full",
-      "sandbox": { "mode": "off", "workspaceAccess": "rw" }
+      "allowFrom": {
+        "wecom": ["*"]
+      }
     }
   }
 }
 ```
 
-### 2. Add command allowlist
+> **Note**: `"*"` allows all users to use elevated features. For production, restrict to specific user IDs: `["user_id_1", "user_id_2"]`
 
-```bash
-openclaw approvals allowlist add --agent '*' '*'
-```
-
-> **Security Note**: The above config grants Agent full command execution permissions. For production, restrict allowed commands.
-
-### 3. Restart Gateway
-
+Restart Gateway after configuration:
 ```bash
 openclaw gateway restart
 ```
 
-### Verify Configuration
+Verify configuration (send in WeCom):
 
-Test in WeCom:
-- "Show me what files are on the desktop"
+- "Show me what files are in the current directory"
 - "Run ls -la command"
 
 ## Troubleshooting
