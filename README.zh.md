@@ -94,6 +94,11 @@ openclaw gateway restart
 > 仅配置 Bot 时：可收图片/文件（URL 解密），但**出站媒体仍需 App 凭据**。
 > 视频识别已在自建应用（App）模式验证可用；Bot 模式目前未验证/可能不支持，如需尝试需开启 `media.auto.video` 且回调必须提供可下载的视频 URL，否则只能给出“收到视频”的文本提示。
 
+### 图片识别策略（Bot/App）
+默认走 **方式 2**：由 OpenClaw 直接把图片作为模型视觉输入（不依赖 Read 工具读取图片文件）。要求你在 `~/.openclaw/openclaw.json` 把所用模型的 `input` 声明包含 `"image"`（例如 `["text","image"]`）。
+
+如需开启 **方式 1**（插件内置 vision 识图），设置 `channels.wecom.media.vision.enabled=true`。启用后会优先产出“图片识别结果”，失败则自动回退到方式 2。`vision.baseUrl/apiKey/model` 可单独配置；如 OpenClaw 已在 `openclaw.json` 的 `models.providers` 中配置了同一 Provider 的 `baseUrl/apiKey`，也可不重复填写。
+
 ## 命令补充（App 模式）
 - `/sendfile`：发送服务器文件（支持多个绝对路径）
   - 支持目录：自动打包为 zip 后发送
@@ -149,6 +154,7 @@ openclaw send --channel wecom --to chat:CHAT_ID "群消息测试"
 - 媒体过大：调整 `media.maxBytes` 或发送更小文件
 - invalid access_token：检查 `corpId/corpSecret/agentId`
 - 依赖缺失导致插件未加载：请升级到最新版本并通过 npm 安装
+- App 模式发送失败（`errcode=60020` / `not allow to access from your ip`）：企业微信自建应用开启了 **可信 IP / IP 白名单**，需要把运行 OpenClaw 的出口公网 IP 加入白名单（以报错里的 `from ip:` 为准；也可在服务器执行 `curl -s https://ipinfo.io/ip` 获取）。如需“允许所有 IP”，在企业微信后台关闭/清空可信 IP 限制（以后台提示为准）。
 
 ## 资料入口
 - 开发文档：`docs/TECHNICAL.md`

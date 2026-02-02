@@ -649,7 +649,7 @@ async function buildBotMediaMessage(params: {
     if (cached) {
       if (msgtype === "image" && cached.summary) {
         return {
-          text: `[用户发送了一张图片]\n\n[图片识别结果]\n${cached.summary}\n\n请根据识别结果回复用户。`,
+          text: `[用户发送了一张图片]\n\n[图片识别结果]\n${cached.summary}\n\n请根据识别结果回复用户（无需使用 Read 工具读取图片文件）。`,
           media: cached.media,
         };
       }
@@ -772,7 +772,7 @@ async function buildBotMediaMessage(params: {
         mimeType: contentType || "image/jpeg",
         url,
       };
-      const visionConfig = resolveVisionConfig(target.account.config);
+      const visionConfig = resolveVisionConfig(target.account.config, target.config);
       const summary = visionConfig
         ? await describeImageWithVision({
           config: visionConfig,
@@ -783,7 +783,7 @@ async function buildBotMediaMessage(params: {
       storeCachedMedia(cacheKey, media, buffer.length, summary ?? undefined);
       return {
         text: summary
-          ? `[用户发送了一张图片]\n\n[图片识别结果]\n${summary}\n\n请根据识别结果回复用户。`
+          ? `[用户发送了一张图片]\n\n[图片识别结果]\n${summary}\n\n请根据识别结果回复用户（无需使用 Read 工具读取图片文件）。`
           : buildInboundMediaPrompt("image"),
         media,
       };
@@ -1103,7 +1103,9 @@ function storeCachedMedia(key: string | null, entry: InboundMedia, size: number,
 }
 
 function buildInboundMediaPrompt(msgtype: "image" | "voice" | "video" | "file", filename?: string): string {
-  if (msgtype === "image") return "[用户发送了一张图片]\n\n请根据图片内容回复用户。";
+  if (msgtype === "image") {
+    return "[用户发送了一张图片]\n\n请直接根据图片内容回复用户（图片将作为视觉输入提供；无需使用 Read 工具读取图片文件）。";
+  }
   if (msgtype === "voice") return "[用户发送了一条语音消息]\n\n请根据语音内容回复用户。";
   if (msgtype === "video") return "[用户发送了一个视频文件]\n\n请根据视频内容回复用户。";
   const label = filename ? `用户发送了一个文件: ${filename}` : "用户发送了一个文件";

@@ -911,9 +911,9 @@ async function processAppMessage(params: {
         mediaContext = { type: cached.type, path: cached.path, mimeType: cached.mimeType, url: cached.url };
         logVerbose(target, `app image cache hit: ${cached.path}`);
         if (cached.summary) {
-          messageText = `[用户发送了一张图片]\n\n[图片识别结果]\n${cached.summary}\n\n请根据识别结果回复用户。`;
+          messageText = `[用户发送了一张图片]\n\n[图片识别结果]\n${cached.summary}\n\n请根据识别结果回复用户（无需使用 Read 工具读取图片文件）。`;
         } else {
-          messageText = "[用户发送了一张图片]\n\n请根据图片内容回复用户。";
+          messageText = "[用户发送了一张图片]\n\n请直接根据图片内容回复用户（图片将作为视觉输入提供；无需使用 Read 工具读取图片文件）。";
         }
       } else {
         let buffer: Buffer | null = null;
@@ -946,7 +946,7 @@ async function processAppMessage(params: {
             const mimeType = contentType || "image/jpeg";
             mediaContext = { type: "image", path: tempImagePath, mimeType, url: picUrl || undefined };
 
-            const visionConfig = resolveVisionConfig(target.account.config);
+            const visionConfig = resolveVisionConfig(target.account.config, target.config);
             const summary = visionConfig
               ? await describeImageWithVision({ config: visionConfig, buffer, mimeType })
               : null;
@@ -970,9 +970,9 @@ async function processAppMessage(params: {
             }
             logVerbose(target, `app image saved (${buffer.length} bytes): ${tempImagePath}`);
             if (summary) {
-              messageText = `[用户发送了一张图片]\n\n[图片识别结果]\n${summary}\n\n请根据识别结果回复用户。`;
+              messageText = `[用户发送了一张图片]\n\n[图片识别结果]\n${summary}\n\n请根据识别结果回复用户（无需使用 Read 工具读取图片文件）。`;
             } else {
-              messageText = "[用户发送了一张图片]\n\n请根据图片内容回复用户。";
+              messageText = "[用户发送了一张图片]\n\n请直接根据图片内容回复用户（图片将作为视觉输入提供；无需使用 Read 工具读取图片文件）。";
             }
           }
         } else {

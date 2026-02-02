@@ -149,6 +149,33 @@ openclaw gateway restart
 - 视频识别已在 App 模式验证；Bot 模式未验证/可能不支持
 - 文本文件可自动预览（小文件直接读入）
 
+### 图片识别策略（Bot/App）
+插件支持两种“识图”路径，可同时配置：
+
+1) **方式 2（默认，推荐）**：让 OpenClaw 直接把图片作为模型的视觉输入（不走 Read 工具读图片文件）
+   - 需要在 `~/.openclaw/openclaw.json` 把所用模型的 `input` 包含 `"image"`（例如：`["text","image"]`）。
+   - 这样插件会把图片落盘并提供给 OpenClaw，模型可直接看图回答。
+
+2) **方式 1（可选）**：插件内置 vision 识图（`channels.wecom.media.vision`）
+   - 开启 `channels.wecom.media.vision.enabled=true` 后，插件会优先用 vision 生成“图片识别结果”并交给 Agent 回复；
+   - 若 vision 识图失败，会自动回退到方式 2（直接走模型视觉输入）。
+   - `vision.baseUrl / vision.apiKey / vision.model` 可显式配置；如 OpenClaw 已在 `openclaw.json` 的 `models.providers` 中配置了同一 Provider 的 `baseUrl/apiKey`，也可不重复填写。
+
+`openclaw.json` 示例（仅演示 input 声明，字段以你实际 provider 为准）：
+```json5
+{
+  "models": {
+    "providers": {
+      "looksunlight": {
+        "models": [
+          { "id": "gpt-5.2-chat", "input": ["text", "image"] }
+        ]
+      }
+    }
+  }
+}
+```
+
 建议安装 ffmpeg（Ubuntu）：
 ```bash
 sudo apt-get update && sudo apt-get install -y ffmpeg
@@ -207,3 +234,6 @@ openclaw send --channel wecom --to chat:CHAT_ID "群消息测试"
 - 回调验证失败：检查 Token / AESKey / URL 是否一致
 - 没有回复：检查 OpenClaw 是否已启用插件并重启 gateway
 - 插件加载失败（缺依赖）：升级到最新版本并用 npm 安装
+- App 模式发送失败（`errcode=60020` / `not allow to access from your ip`）：企业微信自建应用开启了 **可信 IP / IP 白名单**，需要把运行 OpenClaw 的出口公网 IP 加入白名单（以报错里的 `from ip:` 为准；也可在服务器执行 `curl -s https://ipinfo.io/ip` 获取）。
+  - 如需“允许所有 IP”：需要在企业微信后台 **关闭/清空** 可信 IP 限制（是否允许留空、如何生效以企业微信后台提示为准）。
+  - 注意：家宽/移动网络公网 IP 可能会变，建议使用固定出口（云服务器、固定公网、或自建 NAT 出口）以避免反复改白名单。
