@@ -4,8 +4,6 @@
 
 OpenClaw WeCom 插件，支持 **智能机器人 API 模式** 与 **自建应用模式**（双模式），并支持多账户、媒体消息与群聊。
 
-> 以 `docs/TECHNICAL.md` 为准；开发前请先阅读。
-
 ## 功能概览
 - 双模式：Bot API（JSON 回调 + stream）/ App（XML 回调 + ACK + 主动发送）
 - 多账户：`channels.wecom.accounts`
@@ -16,7 +14,8 @@ OpenClaw WeCom 插件，支持 **智能机器人 API 模式** 与 **自建应用
 - 进阶：文件夹打包发送、发送队列、操作日志、多媒体自动识别
 
 ## 安装
-### npm 安装
+
+### npm 安装（推荐）
 ```bash
 openclaw plugins install @marshulll/openclaw-wecom
 openclaw plugins enable openclaw-wecom
@@ -33,84 +32,133 @@ openclaw gateway restart
 > 本地路径加载需要先在项目目录执行 `npm install`。
 
 ## 配置
-主配置写入：`~/.openclaw/openclaw.json`  
-推荐仅使用主配置；环境变量仅作为兜底。
 
-最小示例：`docs/wecom.config.example.json`  
-全量示例：`docs/wecom.config.full.example.json`  
-安装与配置说明：`docs/INSTALL.md`
+主配置写入：`~/.openclaw/openclaw.json`
 
-建议：Bot 与 App 使用**不同的 webhookPath**（如 `/wecom/bot` 与 `/wecom/app`），便于排障并避免回调混淆。
+- 最小示例：`docs/wecom.config.example.json`
+- 全量示例：`docs/wecom.config.full.example.jsonc`（带注释）
 
-### 最小配置示例
+> 建议 Bot 与 App 使用**不同的 webhookPath**（如 `/wecom/bot` 与 `/wecom/app`），便于排障并避免回调混淆。
+
+### 配置示例（双模式）
 ```json5
 {
   "channels": {
     "wecom": {
       "enabled": true,
       "mode": "both",
-      "webhookPath": "/wecom",
-      "token": "BOT_TOKEN",
-      "encodingAESKey": "BOT_AES",
-      "receiveId": "BOT_ID",
-      "corpId": "CORP_ID",
-      "corpSecret": "CORP_SECRET",
-      "agentId": 1000001,
-      "callbackToken": "CALLBACK_TOKEN",
-      "callbackAesKey": "CALLBACK_AES"
+      "defaultAccount": "bot",
+      "accounts": {
+        "bot": {
+          "mode": "bot",
+          "webhookPath": "/wecom/bot",
+          "token": "BOT_TOKEN",
+          "encodingAESKey": "BOT_AES",
+          "receiveId": "BOT_ID"
+        },
+        "app": {
+          "mode": "app",
+          "webhookPath": "/wecom/app",
+          "corpId": "CORP_ID",
+          "corpSecret": "CORP_SECRET",
+          "agentId": 1000001,
+          "callbackToken": "CALLBACK_TOKEN",
+          "callbackAesKey": "CALLBACK_AES"
+        }
+      }
     }
   }
 }
 ```
 
 ### 关键字段说明
-- Bot 模式 `receiveId`：建议填写 **Bot ID（aibotid）**，用于回调加解密校验
-- App 模式回调解密使用 **CorpID**（`corpId`）
+| 字段 | 说明 |
+|------|------|
+| `receiveId` | Bot 模式：填写 **Bot ID（aibotid）**，用于回调加解密校验 |
+| `corpId` | App 模式：企业 ID，用于回调解密和 API 调用 |
+| `agentId` | App 模式：应用 ID（整数） |
 
-## 回调配置（企业微信后台）
-### Bot 模式
-- URL：`https://你的域名/wecom`
-- Token：自定义
-- EncodingAESKey：后台生成
-- Bot ID（aibotid）：填写到 `receiveId`
-
-### App 模式
-- URL：`https://你的域名/wecom`
-- Token / EncodingAESKey：后台生成，对应 `callbackToken` / `callbackAesKey`
-- CorpID / AgentID / Secret：分别对应 `corpId` / `agentId` / `corpSecret`
-
-> 两种模式都要求公网 HTTPS；配置完成后请重启 OpenClaw gateway。
-
-## 模式说明
+### 模式说明
 - `mode: "bot"`：只启用智能机器人 API 模式
 - `mode: "app"`：只启用自建应用模式
 - `mode: "both"`：同时启用两种模式（默认）
 
-## 媒体处理说明
-- App 模式：收到媒体会下载到本地临时目录（可配置 `media.tempDir`）
-- Bot 模式入站媒体：图片/文件若回调提供 URL，会用 `encodingAESKey` 解密并落盘（无需 App 凭据）
-- Bot 模式媒体桥接：当 reply payload 含 `mediaUrl + mediaType` 时，
-  若已配置 App 凭据，会自动上传并发送媒体
-> 仅配置 Bot 时：可收图片/文件（URL 解密），但**出站媒体仍需 App 凭据**。
-> 视频识别已在自建应用（App）模式验证可用；Bot 模式目前未验证/可能不支持，如需尝试需开启 `media.auto.video` 且回调必须提供可下载的视频 URL，否则只能给出“收到视频”的文本提示。
+## 回调配置（企业微信后台）
 
-## 命令补充（App 模式）
-- `/sendfile`：发送服务器文件（支持多个绝对路径）
-  - 支持目录：自动打包为 zip 后发送
-  - 示例：`/sendfile /tmp/openclaw-wecom /home/shu/Desktop/report.pdf`
-  - 也支持自然语言：`把这个文件发给我 image-xxx.jpg`（默认仅在 `media.tempDir` 内匹配）
-  - 搜索范围关键词：`桌面` → `~/Desktop`，`下载` → `~/Downloads`，`临时` → `media.tempDir`
-  - 多文件会先返回列表，回复“全部”或序号再发送；回复“更多”可翻页
+两种模式都要求**公网 HTTPS**，配置完成后请重启 OpenClaw gateway。
 
-## 主动消息（App 模式）
-主动推送接口路径为：`{webhookPath}/push`（例如 `/wecom/app/push`）。
+### Bot 模式
+- URL：`https://你的域名/wecom/bot`
+- Token / EncodingAESKey：后台生成，对应 `token` / `encodingAESKey`
+- Bot ID（aibotid）：填写到 `receiveId`
 
-- 方法：`POST`
-- 鉴权：`pushToken`（可选，但建议开启）
-  - 可放在 `Authorization: Bearer <token>`、`x-openclaw-token`、`token` 参数或 body 的 `token` 字段
-- 目标：`toUser`（单人）或 `chatId`（群聊），二选一
+### App 模式
+- URL：`https://你的域名/wecom/app`
+- Token / EncodingAESKey：后台生成，对应 `callbackToken` / `callbackAesKey`
+- CorpID / AgentID / Secret：分别对应 `corpId` / `agentId` / `corpSecret`
 
-最小示例（文本）：
+## 媒体处理
+
+### 入站媒体
+- **App 模式**：收到媒体会下载到本地临时目录（可配置 `media.tempDir`）
+- **Bot 模式**：图片/文件若回调提供 URL，会用 `encodingAESKey` 解密并落盘
+
+### 出站媒体
+- **必须配置 App 凭据**（`corpId/corpSecret/agentId`）才能发送媒体
+- Bot 模式媒体桥接：当 reply payload 含 `mediaUrl + mediaType` 时，会自动上传并发送
+
+### 图片识别
+插件支持两种识图方式：
+
+1. **模型视觉输入（默认）**：让模型直接看图
+   - 需在 `~/.openclaw/openclaw.json` 把模型的 `input` 包含 `"image"`
+
+2. **插件内置 vision（可选）**：开启 `channels.wecom.media.vision.enabled=true`
+   - 插件会先用 vision 生成识别结果，失败则回退到模型视觉输入
+
+### 视频识别
+- 需要安装 **ffmpeg**
+- 开启：`media.auto.video.enabled=true`
+- 模式：`light`（默认，抽取少量帧）/ `full`（按间隔抽帧）
+
+```bash
+# Ubuntu/Debian
+sudo apt-get update && sudo apt-get install -y ffmpeg
+
+# macOS
+brew install ffmpeg
+```
+
+## 文件发送
+
+### /sendfile 命令（App 模式）
+发送服务器文件，支持多个绝对路径：
+```
+/sendfile /tmp/openclaw-wecom /home/user/report.pdf
+```
+- 支持目录：自动打包为 zip 后发送
+- 支持自然语言：`把这个文件发给我 image-xxx.jpg`
+- 搜索范围关键词：`桌面` → `~/Desktop`，`下载` → `~/Downloads`
+
+### Agent 文件收发（App 模式）
+让 Agent 通过 `message` 工具主动发送文件（如"把桌面的文件发给我"）。
+
+**前置条件**：
+1. 必须配置 App 模式凭据
+2. 启用工具权限（参考下方"OpenClaw 工具权限配置"）
+
+**支持的媒体类型**：
+| 类型 | 扩展名 | 大小限制 |
+|------|--------|----------|
+| 图片 | `.jpg` `.jpeg` `.png` `.gif` `.bmp` `.webp` | 10MB |
+| 语音 | `.amr` `.mp3` `.wav` `.m4a` `.ogg` | 2MB |
+| 视频 | `.mp4` `.mov` `.avi` `.mkv` `.webm` | 10MB |
+| 文件 | 其他所有扩展名 | 20MB |
+
+## 主动推送（App 模式）
+
+接口路径：`{webhookPath}/push`（例如 `/wecom/app/push`）
+
 ```bash
 curl -X POST "https://你的域名/wecom/app/push" \
   -H "Content-Type: application/json" \
@@ -118,40 +166,92 @@ curl -X POST "https://你的域名/wecom/app/push" \
   -d '{"toUser":"WenShuJun","text":"你好"}'
 ```
 
-发送媒体（file/image/voice/video）：支持 `mediaUrl` 或 `mediaBase64`，可与 `text` 同时发送。
+| 参数 | 说明 |
+|------|------|
+| `toUser` | 目标用户 ID |
+| `chatId` | 目标群聊 ID（与 toUser 二选一） |
+| `text` | 文本内容 |
+| `mediaUrl` | 媒体 URL（可与 text 同时发送） |
 
-## 统一出站（OpenClaw 控制台）
-用于在 OpenClaw 控制台/CLI 主动发送消息（不依赖用户先发消息）。
+## 统一出站（CLI）
 
-- **仅支持 App 模式**（必须配置 `corpId/corpSecret/agentId`）
-- 发送私聊：`--to <userid>` 或 `--to wecom:<userid>`
-- 发送群聊：`--to chat:<chatId>` 或 `--to group:<chatId>`
-
-示例：
+通过 OpenClaw CLI 主动发送消息：
 ```bash
 openclaw send --channel wecom --to WenShuJun "你好"
 openclaw send --channel wecom --to chat:CHAT_ID "群消息测试"
 ```
 
-## 多媒体自动识别（可选）
-- **语音收发不需要 API**，只有开启“语音自动转写”才需要 OpenAI 兼容接口
-- **视频识别需要 ffmpeg**（服务器已安装后，将 `media.auto.video.enabled` 设为 `true`）
-- 视频识别支持 **light / full** 两种模式（默认 light），可通过 `media.auto.video.mode` 切换
-- 文本文件可自动预览（小文件直接读入）
+## OpenClaw 工具权限配置
 
-## 发送队列与操作日志（可选）
-- `sendQueue.intervalMs`：/sendfile 多文件发送间隔（防止限流）
-- `operations.logPath`：记录发送文件/主动推送（JSONL）
+如果希望 Agent 能够执行本地命令（如查看文件、运行脚本等），需要配置工具权限。
+
+### 1. 添加 tools 配置
+
+在 `~/.openclaw/openclaw.json` 中添加：
+
+```json
+{
+  "tools": {
+    "profile": "full",
+    "allow": ["*"],
+    "elevated": {
+      "enabled": true,
+      "allowFrom": { "webchat": ["*"] }
+    },
+    "exec": {
+      "host": "gateway",
+      "security": "full",
+      "ask": "off"
+    }
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "bash": true,
+    "useAccessGroups": false
+  },
+  "agents": {
+    "defaults": {
+      "workspace": "~/.openclaw/workspace",
+      "elevatedDefault": "full",
+      "sandbox": { "mode": "off", "workspaceAccess": "rw" }
+    }
+  }
+}
+```
+
+### 2. 添加命令执行白名单
+
+```bash
+openclaw approvals allowlist add --agent '*' '*'
+```
+
+> **安全提示**：上述配置给予 Agent 完全的命令执行权限。生产环境建议限制允许的命令范围。
+
+### 3. 重启 Gateway
+
+```bash
+openclaw gateway restart
+```
+
+### 验证配置
+
+在企业微信中发送测试：
+- "帮我看下桌面有什么文件"
+- "运行 ls -la 命令"
 
 ## 常见问题
-- 回调验证失败：检查 Token / AESKey / URL 是否一致
-- 没有回复：确认已启用插件并重启 gateway
-- 媒体过大：调整 `media.maxBytes` 或发送更小文件
-- invalid access_token：检查 `corpId/corpSecret/agentId`
-- 依赖缺失导致插件未加载：请升级到最新版本并通过 npm 安装
+
+| 问题 | 解决方案 |
+|------|----------|
+| 回调验证失败 | 检查 Token / AESKey / URL 是否一致 |
+| 没有回复 | 确认已启用插件并重启 gateway |
+| 媒体过大 | 调整 `media.maxBytes` 或发送更小文件 |
+| invalid access_token | 检查 `corpId/corpSecret/agentId` |
+| Agent 无法执行命令 | 检查 `tools` 配置和白名单 |
+| `errcode=60020` | 企业微信 IP 白名单问题，需添加服务器出口 IP（`curl -s https://ipinfo.io/ip`） |
 
 ## 资料入口
 - 开发文档：`docs/TECHNICAL.md`
-- 安装配置：`docs/INSTALL.md`
-- 配置示例：`docs/wecom.config.example.json` / `docs/wecom.config.full.example.json`
+- 配置示例：`docs/wecom.config.example.json` / `docs/wecom.config.full.example.jsonc`
 - 测试清单：`docs/TESTING.md`

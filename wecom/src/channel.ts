@@ -194,6 +194,98 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
         };
       }
     },
+    sendMedia: async ({ cfg, to, text, mediaUrl, accountId }) => {
+      try {
+        const resolvedAccount = accountId ?? DEFAULT_ACCOUNT_ID;
+        const account = resolveWecomAccount({ cfg: cfg as ClawdbotConfig, accountId: resolvedAccount });
+        let target = typeof to === "string" ? to.trim() : "";
+        if (target.toLowerCase().startsWith("wecom:")) {
+          target = target.slice("wecom:".length).trim();
+        }
+        if (!target) {
+          return {
+            channel: "wecom",
+            ok: false,
+            messageId: "",
+            error: new Error("WeCom outbound requires --to <userid|chatid>."),
+          };
+        }
+        if (!account.corpId || !account.corpSecret || !account.agentId) {
+          return {
+            channel: "wecom",
+            ok: false,
+            messageId: "",
+            error: new Error("WeCom app outbound requires corpId/corpSecret/agentId (App mode)."),
+          };
+        }
+        if (!mediaUrl) {
+          return {
+            channel: "wecom",
+            ok: false,
+            messageId: "",
+            error: new Error("WeCom sendMedia requires mediaUrl."),
+          };
+        }
+        const { uploadWecomMedia, sendWecomMedia, sendWecomText } = await import("./wecom-api.js");
+        const fs = await import("fs");
+        const path = await import("path");
+
+        const lower = target.toLowerCase();
+        const chatPrefixes = ["chat:", "chatid:", "group:"];
+        const matchedPrefix = chatPrefixes.find((prefix) => lower.startsWith(prefix));
+        const chatId = matchedPrefix ? target.slice(matchedPrefix.length).trim() : undefined;
+        const toUser = matchedPrefix ? "" : target;
+
+        let buffer: Buffer;
+        let filename: string;
+        if (mediaUrl.startsWith("file://")) {
+          const filePath = mediaUrl.slice(7);
+          buffer = fs.readFileSync(filePath);
+          filename = path.basename(filePath);
+        } else if (mediaUrl.startsWith("/") || /^[a-zA-Z]:/.test(mediaUrl)) {
+          buffer = fs.readFileSync(mediaUrl);
+          filename = path.basename(mediaUrl);
+        } else {
+          const res = await fetch(mediaUrl);
+          if (!res.ok) {
+            throw new Error(`Failed to fetch media: ${res.status} ${res.statusText}`);
+          }
+          buffer = Buffer.from(await res.arrayBuffer());
+          const urlPath = new URL(mediaUrl).pathname;
+          filename = path.basename(urlPath) || "media";
+        }
+
+        const ext = path.extname(filename).toLowerCase();
+        let mediaType: "image" | "voice" | "video" | "file" = "file";
+        if ([".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"].includes(ext)) {
+          mediaType = "image";
+        } else if ([".amr", ".mp3", ".wav", ".m4a", ".ogg"].includes(ext)) {
+          mediaType = "voice";
+        } else if ([".mp4", ".mov", ".avi", ".mkv", ".webm"].includes(ext)) {
+          mediaType = "video";
+        }
+
+        const mediaId = await uploadWecomMedia({ account, type: mediaType, buffer, filename });
+        await sendWecomMedia({ account, toUser, chatId, mediaId, mediaType });
+
+        if (text) {
+          await sendWecomText({ account, toUser, chatId, text: String(text) });
+        }
+
+        return {
+          channel: "wecom",
+          ok: true,
+          messageId: "",
+        };
+      } catch (err) {
+        return {
+          channel: "wecom",
+          ok: false,
+          messageId: "",
+          error: err instanceof Error ? err : new Error(String(err)),
+        };
+      }
+    },
   },
   status: {
     defaultRuntime: {

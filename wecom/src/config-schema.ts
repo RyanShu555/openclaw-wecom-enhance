@@ -45,6 +45,7 @@ const accountSchema = z.object({
 
   media: z.object({
     tempDir: z.string().optional(),
+    searchPaths: z.array(z.string()).optional(),
     retentionHours: z.number().optional(),
     cleanupOnStart: z.boolean().optional(),
     maxBytes: z.number().optional(),
@@ -127,6 +128,7 @@ export const WecomConfigSchema = ensureJsonSchema(z.object({
 
   media: z.object({
     tempDir: z.string().optional(),
+    searchPaths: z.array(z.string()).optional(),
     retentionHours: z.number().optional(),
     cleanupOnStart: z.boolean().optional(),
     maxBytes: z.number().optional(),

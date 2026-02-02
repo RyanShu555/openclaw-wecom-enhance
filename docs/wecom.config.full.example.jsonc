@@ -1,0 +1,161 @@
+{
+  // ============================================================
+  // OpenClaw 工具权限配置（Agent 执行命令所需）
+  // ============================================================
+  "tools": {
+    "profile": "full",                    // 工具配置文件: "full" 表示完整权限
+    "allow": ["*"],                       // 允许的工具列表: ["*"] 表示全部
+    "elevated": {
+      "enabled": true,                    // 是否启用提升权限
+      "allowFrom": {
+        "webchat": ["*"]                  // 允许来源: webchat 渠道的所有用户
+      }
+    },
+    "exec": {
+      "host": "gateway",                  // 执行主机: gateway
+      "security": "full",                 // 安全级别: "full" 表示完全信任
+      "ask": "off"                        // 执行前是否询问: "off" 表示不询问
+    }
+  },
+
+  // ============================================================
+  // 命令配置
+  // ============================================================
+  "commands": {
+    "native": "auto",                     // 原生命令: "auto" 自动检测
+    "nativeSkills": "auto",               // 原生技能: "auto" 自动检测
+    "bash": true,                         // 是否允许 bash 命令
+    "useAccessGroups": false              // 是否使用访问组
+  },
+
+  // ============================================================
+  // Agent 默认配置
+  // ============================================================
+  "agents": {
+    "defaults": {
+      "workspace": "~/.openclaw/workspace",   // Agent 工作目录
+      "elevatedDefault": "full",              // 默认提升权限级别
+      "sandbox": {
+        "mode": "off",                        // 沙箱模式: "off" 关闭沙箱
+        "workspaceAccess": "rw"               // 工作目录访问权限: 读写
+      }
+    }
+  },
+
+  // ============================================================
+  // 渠道配置
+  // ============================================================
+  "channels": {
+    "wecom": {
+      "enabled": true,                        // 是否启用企业微信渠道
+      "mode": "both",                         // 模式: "bot" | "app" | "both"
+
+      // ----------------------------------------------------------
+      // 媒体处理配置
+      // ----------------------------------------------------------
+      "media": {
+        "tempDir": "/tmp/openclaw-wecom",     // 媒体临时目录
+        "retentionHours": 72,                 // 媒体保留时间（小时）
+        "cleanupOnStart": true,               // 启动时是否清理过期媒体
+        "maxBytes": 10485760,                 // 媒体最大字节数（10MB）
+
+        // 图片识别配置（可选，需要 OpenAI 兼容 API）
+        "vision": {
+          "enabled": true,                    // 是否启用图片识别
+          "baseUrl": "https://api.openai.com/v1",  // OpenAI 兼容 API 地址
+          "apiKey": "sk-your-api-key",        // API 密钥（替换为真实值）
+          "model": "gpt-4o-mini",             // 视觉模型名称
+          "prompt": "请描述图片内容并尽量提取可见文字。",  // 识别提示词
+          "maxTokens": 400,                   // 最大输出 token 数
+          "timeoutMs": 15000,                 // 请求超时（毫秒）
+          "maxBytes": 5242880                 // 图片最大字节数（5MB）
+        },
+
+        // 自动处理配置
+        "auto": {
+          "enabled": true,                    // 是否启用自动处理
+
+          // 文件预览配置
+          "file": {
+            "enabled": true,                  // 是否启用文件预览
+            "textMaxBytes": 200000,           // 文本文件最大字节数
+            "textMaxChars": 4000,             // 预览最大字符数
+            "extensions": ["txt", "md", "log", "csv", "json", "xml", "yaml", "yml"]  // 支持的扩展名
+          },
+
+          // 语音转写配置（可选，需要 OpenAI 兼容 API）
+          "audio": {
+            "enabled": true,                  // 是否启用语音转写
+            "baseUrl": "https://api.openai.com/v1",  // OpenAI 兼容 API 地址
+            "apiKey": "sk-your-api-key",      // API 密钥（替换为真实值）
+            "model": "whisper-1",             // 语音转写模型名称
+            "prompt": "请尽量保留原话并加上标点。",  // 转写提示词
+            "timeoutMs": 15000,               // 请求超时（毫秒）
+            "maxBytes": 5242880               // 音频最大字节数（5MB）
+          },
+
+          // 视频识别配置（需要 ffmpeg）
+          "video": {
+            "enabled": true,                  // 是否启用视频识别
+            "ffmpegPath": "ffmpeg",           // ffmpeg 可执行文件路径
+            "maxBytes": 104857600,            // 视频最大字节数（100MB）
+            "mode": "light",                  // 识别模式: "light" | "full"
+            "frames": 5,                      // light 模式抽取帧数
+            "intervalSec": 2,                 // full 模式抽帧间隔（秒）
+            "maxDurationSec": 60,             // full 模式最大处理时长（秒）
+            "maxFrames": 30                   // full 模式最大帧数
+          }
+        }
+      },
+
+      // Bot 模式媒体桥接（使用 App 凭据发送媒体）
+      "botMediaBridge": true,
+
+      // 发送队列配置
+      "sendQueue": {
+        "intervalMs": 400                     // 多文件发送间隔（毫秒，防止限流）
+      },
+
+      // 操作日志配置
+      "operations": {
+        "logPath": "/tmp/openclaw-wecom-ops.log"  // 操作日志路径（JSONL 格式）
+      },
+
+      // ----------------------------------------------------------
+      // 私聊策略配置
+      // ----------------------------------------------------------
+      "dm": {
+        "policy": "pairing",                  // 私聊策略: "pairing" | "allow" | "deny"
+        "allowFrom": []                       // 允许私聊的用户列表（policy 为 allow 时生效）
+      },
+
+      // ----------------------------------------------------------
+      // 多账户配置
+      // ----------------------------------------------------------
+      "defaultAccount": "bot",                // 默认账户 ID
+
+      "accounts": {
+        // Bot 模式账户（智能机器人 API）
+        "bot": {
+          "mode": "bot",                      // 账户模式
+          "webhookPath": "/wecom/bot",        // 回调路径
+          "token": "YOUR_BOT_TOKEN",          // 企微后台配置的 Token
+          "encodingAESKey": "YOUR_BOT_AES_KEY",  // 企微后台生成的 EncodingAESKey（43位）
+          "receiveId": "YOUR_BOT_ID"          // Bot ID（aibotid）
+        },
+
+        // App 模式账户（自建应用）
+        "app": {
+          "mode": "app",                      // 账户模式
+          "webhookPath": "/wecom/app",        // 回调路径
+          "corpId": "YOUR_CORP_ID",           // 企业 ID（企微管理后台 > 我的企业）
+          "corpSecret": "YOUR_CORP_SECRET",   // 应用 Secret（应用管理 > 自建应用）
+          "agentId": 1000001,                 // 应用 AgentId（整数）
+          "callbackToken": "YOUR_CALLBACK_TOKEN",      // 回调 Token
+          "callbackAesKey": "YOUR_CALLBACK_AES_KEY",   // 回调 EncodingAESKey（43位）
+          "pushToken": "YOUR_PUSH_TOKEN"      // 主动推送鉴权 Token（可选）
+        }
+      }
+    }
+  }
+}

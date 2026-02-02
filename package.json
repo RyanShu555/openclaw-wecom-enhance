@@ -55,10 +55,9 @@
   "license": "MIT",
   "files": [
     "wecom/**",
-    "docs/INSTALL.md",
     "docs/TESTING.md",
     "docs/wecom.config.example.json",
-    "docs/wecom.config.full.example.json",
+    "docs/wecom.config.full.example.jsonc",
     "openclaw.plugin.json",
     "README.md",
     "README.zh.md",

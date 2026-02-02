@@ -1,9 +1,8 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import crypto from "node:crypto";
 import { XMLParser } from "fast-xml-parser";
-import { appendFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, extname, join } from "node:path";
+import { basename, join } from "node:path";
 
 import type { WecomWebhookTarget } from "./monitor.js";
 import { decryptWecomEncrypted, verifyWecomSignature } from "./crypto.js";
@@ -20,7 +19,6 @@ import {
 } from "./media-auto.js";
 import { describeImageWithVision, resolveVisionConfig } from "./media-vision.js";
 import {
-  MEDIA_TOO_LARGE_ERROR,
   downloadWecomMedia,
   fetchMediaFromUrl,
   sendWecomFile,
@@ -38,6 +36,33 @@ import {
   resolveMediaTempDir,
   sanitizeFilename,
 } from "./media-utils.js";
+import {
+  readRequestBody,
+  resolveHeaderToken,
+  resolveQueryParams,
+  resolveSignatureParam,
+} from "./shared/http-utils.js";
+import {
+  pickString,
+  sleep,
+} from "./shared/string-utils.js";
+import {
+  appendOperationLog,
+  resolveSendIntervalMs,
+} from "./shared/log-utils.js";
+import {
+  isMediaTooLargeError,
+  loadOutboundMedia,
+  type MediaType,
+} from "./shared/media-shared.js";
+import {
+  buildMediaCacheKey,
+  getCachedMedia,
+  MEDIA_CACHE_MAX_ENTRIES,
+  type MediaCacheEntry,
+  pruneMediaCache,
+  storeCachedMedia,
+} from "./shared/cache-utils.js";
 
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
@@ -46,17 +71,6 @@ const xmlParser = new XMLParser({
 });
 
 const MAX_REQUEST_BODY_SIZE = 1024 * 1024;
-const MEDIA_CACHE_MAX_ENTRIES = 200;
-
-type MediaCacheEntry = {
-  path: string;
-  type: "image" | "voice" | "video" | "file";
-  mimeType?: string;
-  url?: string;
-  summary?: string;
-  createdAt: number;
-  size: number;
-};
 
 const mediaCache = new Map<string, MediaCacheEntry>();
 
@@ -66,91 +80,9 @@ function parseIncomingXml(xml: string): Record<string, any> {
   return root ?? {};
 }
 
-function resolveQueryParams(req: IncomingMessage): URLSearchParams {
-  const rawUrl = req.url ?? "";
-  const queryIndex = rawUrl.indexOf("?");
-  if (queryIndex < 0) return new URLSearchParams();
-  const queryString = rawUrl.slice(queryIndex + 1);
-  const params = new URLSearchParams();
-  if (!queryString) return params;
-  for (const part of queryString.split("&")) {
-    if (!part) continue;
-    const eqIndex = part.indexOf("=");
-    const keyRaw = eqIndex >= 0 ? part.slice(0, eqIndex) : part;
-    const valueRaw = eqIndex >= 0 ? part.slice(eqIndex + 1) : "";
-    const key = safeDecodeURIComponent(keyRaw);
-    const value = safeDecodeURIComponent(valueRaw);
-    params.append(key, value);
-  }
-  return params;
-}
-
-function safeDecodeURIComponent(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-function resolveSignatureParam(params: URLSearchParams): string {
-  return (
-    params.get("msg_signature") ??
-    params.get("msgsignature") ??
-    params.get("signature") ??
-    ""
-  );
-}
-
 function shouldHandleApp(target: WecomWebhookTarget): boolean {
   const mode = target.account.mode;
   return mode === "app" || mode === "both";
-}
-
-async function readRequestBody(req: IncomingMessage, maxSize = MAX_REQUEST_BODY_SIZE): Promise<string> {
-  return await new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let totalSize = 0;
-
-    req.on("data", (c) => {
-      const chunk = Buffer.isBuffer(c) ? c : Buffer.from(c);
-      totalSize += chunk.length;
-      if (totalSize > maxSize) {
-        reject(new Error(`Request body too large (limit: ${maxSize} bytes)`));
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
-  });
-}
-
-function resolveHeaderToken(req: IncomingMessage): string {
-  const auth = req.headers.authorization ?? "";
-  if (typeof auth === "string" && auth.toLowerCase().startsWith("bearer ")) {
-    return auth.slice(7).trim();
-  }
-  const token = req.headers["x-openclaw-token"];
-  if (typeof token === "string") return token.trim();
-  return "";
-}
-
-function pickFirstString(...values: unknown[]): string {
-  for (const value of values) {
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  return "";
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function resolveSendIntervalMs(target: WecomWebhookTarget): number {
-  const interval = target.account.config.sendQueue?.intervalMs;
-  return typeof interval === "number" && interval >= 0 ? interval : 400;
 }
 
 type PendingSendList = {
@@ -203,12 +135,33 @@ function extractExtension(text: string): string | null {
   return allowed.has(ext) ? ext : null;
 }
 
-function resolveSearchDir(text: string, target: WecomWebhookTarget): { path: string; label: string } {
+function resolveSearchDirs(text: string, target: WecomWebhookTarget): { path: string; label: string }[] {
   const lower = text.toLowerCase();
-  if (text.includes("桌面")) return { path: join(homedir(), "Desktop"), label: "桌面" };
-  if (text.includes("下载") || lower.includes("download")) return { path: join(homedir(), "Downloads"), label: "下载" };
-  if (text.includes("临时") || lower.includes("tmp")) return { path: resolveMediaTempDir(target), label: "临时目录" };
-  return { path: resolveMediaTempDir(target), label: "临时目录" };
+  // 如果明确指定了目录，只搜索该目录
+  if (text.includes("桌面")) return [{ path: join(homedir(), "Desktop"), label: "桌面" }];
+  if (text.includes("下载") || lower.includes("download")) return [{ path: join(homedir(), "Downloads"), label: "下载" }];
+  if (text.includes("临时") || lower.includes("tmp")) return [{ path: resolveMediaTempDir(target), label: "临时目录" }];
+
+  // 没有明确指定目录时，搜索多个常见目录
+  const dirs: { path: string; label: string }[] = [];
+
+  // 1. 配置的 searchPaths
+  const configPaths = target.account.config.media?.searchPaths;
+  if (configPaths && Array.isArray(configPaths)) {
+    for (const p of configPaths) {
+      const resolved = p.startsWith("~") ? join(homedir(), p.slice(1)) : p;
+      dirs.push({ path: resolved, label: basename(resolved) || p });
+    }
+  }
+
+  // 2. 默认搜索目录（如果没有配置 searchPaths）
+  if (dirs.length === 0) {
+    dirs.push({ path: join(homedir(), "Desktop"), label: "桌面" });
+    dirs.push({ path: join(homedir(), "Downloads"), label: "下载" });
+    dirs.push({ path: resolveMediaTempDir(target), label: "临时目录" });
+  }
+
+  return dirs;
 }
 
 function parseSelection(text: string, items: { name: string; path: string }[]): { name: string; path: string }[] | null {
@@ -296,24 +249,38 @@ async function tryHandleNaturalFileSend(params: {
   const ext = extractExtension(text);
   if (names.length === 0 && !ext) return false;
 
-  const searchDir = resolveSearchDir(text, target);
-  let dirEntries: string[] = [];
-  try {
-    dirEntries = await readdir(searchDir.path);
-  } catch {
-    dirEntries = [];
+  // 搜索多个目录
+  const searchDirs = resolveSearchDirs(text, target);
+  const allEntries: Map<string, { name: string; path: string; dir: string }> = new Map();
+
+  for (const searchDir of searchDirs) {
+    try {
+      const entries = await readdir(searchDir.path);
+      for (const entry of entries) {
+        if (!allEntries.has(entry)) {
+          allEntries.set(entry, { name: entry, path: join(searchDir.path, entry), dir: searchDir.label });
+        }
+      }
+    } catch {
+      // ignore directory read errors
+    }
   }
-  const dirSet = new Set(dirEntries);
 
   const resolved: { name: string; path: string }[] = [];
   const missing: string[] = [];
+  let foundInDir = "";
+
   if (names.length > 0) {
     for (const name of names) {
       let fullPath = "";
       if (name.startsWith("/")) {
         fullPath = name;
-      } else if (dirSet.has(name)) {
-        fullPath = join(searchDir.path, name);
+      } else {
+        const entry = allEntries.get(name);
+        if (entry) {
+          fullPath = entry.path;
+          foundInDir = entry.dir;
+        }
       }
       if (!fullPath) {
         missing.push(name);
@@ -331,14 +298,24 @@ async function tryHandleNaturalFileSend(params: {
       }
     }
   } else if (ext) {
-    for (const entry of dirEntries) {
-      if (!entry.toLowerCase().endsWith(`.${ext}`)) continue;
-      const fullPath = join(searchDir.path, entry);
+    // 按扩展名搜索时，只在第一个有匹配的目录中搜索
+    for (const searchDir of searchDirs) {
       try {
-        const info = await stat(fullPath);
-        if (info.isFile()) {
-          resolved.push({ name: entry, path: fullPath });
+        const entries = await readdir(searchDir.path);
+        for (const entry of entries) {
+          if (!entry.toLowerCase().endsWith(`.${ext}`)) continue;
+          const fullPath = join(searchDir.path, entry);
+          try {
+            const info = await stat(fullPath);
+            if (info.isFile()) {
+              resolved.push({ name: entry, path: fullPath });
+              foundInDir = searchDir.label;
+            }
+          } catch {
+            // ignore
+          }
         }
+        if (resolved.length > 0) break; // 找到匹配后停止搜索其他目录
       } catch {
         // ignore
       }
@@ -346,12 +323,14 @@ async function tryHandleNaturalFileSend(params: {
   }
 
   if (resolved.length === 0) {
-    const hint = dirEntries.length ? `可用文件示例：${dirEntries.slice(0, 5).join(", ")}` : "当前目录无可用文件";
+    const allFiles = Array.from(allEntries.values()).slice(0, 5).map(e => e.name);
+    const hint = allFiles.length ? `可用文件示例：${allFiles.join(", ")}` : "搜索目录中无可用文件";
+    const searchedDirs = searchDirs.map(d => d.label).join("、");
     await sendWecomText({
       account: target.account,
       toUser: fromUser,
       chatId: isGroup ? chatId : undefined,
-      text: `未找到指定文件：${missing.join(", ")}。\n${hint}`,
+      text: `未找到指定文件：${missing.join(", ")}。\n已搜索：${searchedDirs}\n${hint}`,
     });
     return true;
   }
@@ -363,7 +342,7 @@ async function tryHandleNaturalFileSend(params: {
 
   pendingSendLists.set(key, {
     items: resolved,
-    dirLabel: searchDir.label,
+    dirLabel: foundInDir || searchDirs[0]?.label || "搜索结果",
     offset: 0,
     createdAt: Date.now(),
     expiresAt: Date.now() + PENDING_TTL_MS,
@@ -387,7 +366,7 @@ async function sendFilesByPath(params: {
 }): Promise<void> {
   const { target, fromUser, chatId, isGroup, items } = params;
   const maxBytes = resolveMediaMaxBytes(target);
-  const intervalMs = resolveSendIntervalMs(target);
+  const intervalMs = resolveSendIntervalMs(target.account.config);
   let sent = 0;
   const failed: string[] = [];
   for (const item of items) {
@@ -411,7 +390,7 @@ async function sendFilesByPath(params: {
         mediaId,
       });
       sent += 1;
-      await appendOperationLog(target, {
+      await appendOperationLog(target.account.config.operations?.logPath, {
         action: "natural-sendfile",
         accountId: target.account.accountId,
         toUser: fromUser,
@@ -422,7 +401,7 @@ async function sendFilesByPath(params: {
       if (intervalMs) await sleep(intervalMs);
     } catch (err) {
       failed.push(item.name);
-      await appendOperationLog(target, {
+      await appendOperationLog(target.account.config.operations?.logPath, {
         action: "natural-sendfile",
         accountId: target.account.accountId,
         toUser: fromUser,
@@ -441,17 +420,6 @@ async function sendFilesByPath(params: {
   });
 }
 
-async function appendOperationLog(target: WecomWebhookTarget, entry: Record<string, unknown>): Promise<void> {
-  const logPath = target.account.config.operations?.logPath?.trim();
-  if (!logPath) return;
-  try {
-    await mkdir(dirname(logPath), { recursive: true });
-    await appendFile(logPath, `${JSON.stringify({ ts: new Date().toISOString(), ...entry })}\n`);
-  } catch {
-    // ignore logging failures
-  }
-}
-
 function logVerbose(target: WecomWebhookTarget, message: string): void {
   target.runtime.log?.(`[wecom] ${message}`);
 }
@@ -460,209 +428,16 @@ function isTextCommand(text: string): boolean {
   return text.trim().startsWith("/");
 }
 
-
-function normalizeMediaType(raw?: string): "image" | "voice" | "video" | "file" | null {
-  if (!raw) return null;
-  const value = raw.toLowerCase();
-  if (value === "image" || value === "voice" || value === "video" || value === "file") return value;
-  return null;
-}
-
-function pickString(...values: unknown[]): string {
-  for (const value of values) {
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  return "";
-}
-
-function isMediaTooLargeError(err: unknown): boolean {
-  if (!err) return false;
-  if (typeof err === "string") return err.includes(MEDIA_TOO_LARGE_ERROR);
-  if (typeof err === "object") {
-    const anyErr = err as { code?: string; message?: string };
-    if (anyErr.code === MEDIA_TOO_LARGE_ERROR) return true;
-    if (typeof anyErr.message === "string" && anyErr.message.includes(MEDIA_TOO_LARGE_ERROR)) return true;
-    if (typeof anyErr.message === "string" && anyErr.message.toLowerCase().includes("media too large")) return true;
-  }
-  return false;
-}
-
-function resolveContentTypeFromExt(ext: string): string {
-  const value = ext.toLowerCase();
-  if (value === "png") return "image/png";
-  if (value === "gif") return "image/gif";
-  if (value === "jpg" || value === "jpeg") return "image/jpeg";
-  if (value === "webp") return "image/webp";
-  if (value === "bmp") return "image/bmp";
-  if (value === "amr") return "audio/amr";
-  if (value === "wav") return "audio/wav";
-  if (value === "mp3") return "audio/mpeg";
-  if (value === "m4a") return "audio/mp4";
-  if (value === "mp4") return "video/mp4";
-  if (value === "mov") return "video/quicktime";
-  if (value === "avi") return "video/x-msvideo";
-  if (value === "pdf") return "application/pdf";
-  if (value === "txt") return "text/plain";
-  if (value === "csv") return "text/csv";
-  if (value === "json") return "application/json";
-  if (value === "doc") return "application/msword";
-  if (value === "docx") return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-  if (value === "xls") return "application/vnd.ms-excel";
-  if (value === "xlsx") return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-  if (value === "ppt") return "application/vnd.ms-powerpoint";
-  if (value === "pptx") return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
-  if (value === "zip") return "application/zip";
-  return "application/octet-stream";
-}
-
-function resolveMediaTypeFromContentType(contentType: string): "image" | "voice" | "video" | "file" {
-  const value = contentType.toLowerCase();
-  if (value.startsWith("image/")) return "image";
-  if (value.startsWith("audio/")) return "voice";
-  if (value.startsWith("video/")) return "video";
-  return "file";
-}
-
-function stripFileProtocol(rawPath: string): string {
-  return rawPath.startsWith("file://") ? rawPath.replace(/^file:\/\//, "") : rawPath;
-}
-
-function parseBase64Input(input: string): { data: string; mimeType?: string } {
-  const match = input.match(/^data:([^;]+);base64,(.*)$/i);
-  if (match) {
-    return { data: match[2], mimeType: match[1] };
-  }
-  return { data: input };
-}
-
-function resolveOutboundMediaSpec(payload: any): {
-  type?: string;
-  url?: string;
-  path?: string;
-  base64?: string;
-  filename?: string;
-  mimeType?: string;
-} | null {
-  if (!payload || typeof payload !== "object") return null;
-  const mediaBlockRaw = payload.media ?? payload.attachment ?? payload.file ?? payload.files;
-  const mediaBlock = Array.isArray(mediaBlockRaw) ? mediaBlockRaw[0] : mediaBlockRaw;
-  const url = pickString(
-    payload.mediaUrl,
-    mediaBlock?.url,
-    mediaBlock?.mediaUrl,
-    mediaBlock?.fileUrl,
-    mediaBlock?.file_url,
-  );
-  const path = pickString(
-    payload.mediaPath,
-    payload.filePath,
-    mediaBlock?.path,
-    mediaBlock?.filePath,
-    mediaBlock?.localPath,
-  );
-  const base64 = pickString(
-    payload.mediaBase64,
-    payload.base64,
-    mediaBlock?.base64,
-    mediaBlock?.data,
-  );
-  const type = pickString(payload.mediaType, mediaBlock?.type, mediaBlock?.mediaType);
-  const filename = pickString(payload.filename, payload.fileName, mediaBlock?.filename, mediaBlock?.fileName, mediaBlock?.name);
-  const mimeType = pickString(payload.mimeType, payload.mediaMimeType, mediaBlock?.mimeType, mediaBlock?.contentType);
-  let finalUrl = url;
-  let finalPath = path;
-  if (!finalPath && finalUrl && (finalUrl.startsWith("/") || finalUrl.startsWith("file://"))) {
-    finalPath = finalUrl;
-    finalUrl = "";
-  }
-  if (!finalUrl && !finalPath && !base64) return null;
-  return { type, url: finalUrl, path: finalPath, base64, filename, mimeType };
-}
-
-async function loadOutboundMedia(params: {
-  payload: any;
-  account: WecomWebhookTarget["account"];
-  maxBytes: number | undefined;
-}): Promise<{ buffer: Buffer; contentType: string; type: "image" | "voice" | "video" | "file"; filename: string } | null> {
-  const spec = resolveOutboundMediaSpec(params.payload);
-  if (!spec) return null;
-
-  let buffer: Buffer | null = null;
-  let contentType = spec.mimeType ?? "";
-  let filename = spec.filename ?? "";
-
-  if (spec.base64) {
-    const parsed = parseBase64Input(spec.base64);
-    buffer = Buffer.from(parsed.data, "base64");
-    if (!contentType && parsed.mimeType) contentType = parsed.mimeType;
-  } else if (spec.path) {
-    const resolvedPath = stripFileProtocol(spec.path);
-    buffer = await readFile(resolvedPath);
-    if (!filename) filename = basename(resolvedPath);
-    if (!contentType) {
-      const ext = extname(resolvedPath).replace(".", "");
-      contentType = resolveContentTypeFromExt(ext);
-    }
-  } else if (spec.url) {
-    const media = await fetchMediaFromUrl(spec.url, params.account, params.maxBytes);
-    buffer = media.buffer;
-    if (!contentType) contentType = media.contentType;
-  }
-
-  if (!buffer) return null;
-  if (params.maxBytes && buffer.length > params.maxBytes) return null;
-
-  const type = normalizeMediaType(spec.type) ?? resolveMediaTypeFromContentType(contentType || "application/octet-stream");
-  const ext = resolveExtFromContentType(contentType || "application/octet-stream", type);
-  const safeName = sanitizeFilename(filename, `${type}.${ext}`);
-
-  return { buffer, contentType: contentType || resolveContentTypeFromExt(ext), type, filename: safeName };
-}
-
-function hashKey(input: string): string {
-  return crypto.createHash("sha1").update(input).digest("hex");
-}
-
-function buildMediaCacheKey(params: { mediaId?: string; url?: string }): string | null {
-  if (params.mediaId) return `media:${params.mediaId}`;
-  if (params.url) return `url:${hashKey(params.url)}`;
-  return null;
-}
-
-function pruneMediaCache(): void {
-  if (mediaCache.size <= MEDIA_CACHE_MAX_ENTRIES) return;
-  const entries = Array.from(mediaCache.entries())
-    .sort((a, b) => a[1].createdAt - b[1].createdAt);
-  const excess = entries.length - MEDIA_CACHE_MAX_ENTRIES;
-  for (let i = 0; i < excess; i += 1) {
-    mediaCache.delete(entries[i]![0]);
-  }
-}
-
-async function getCachedMedia(
+// 本地缓存包装函数
+async function getLocalCachedMedia(
   key: string | null,
   retentionMs?: number,
 ): Promise<MediaCacheEntry | null> {
-  if (!key) return null;
-  const entry = mediaCache.get(key);
-  if (!entry) return null;
-  if (retentionMs && Date.now() - entry.createdAt > retentionMs) {
-    mediaCache.delete(key);
-    return null;
-  }
-  try {
-    await stat(entry.path);
-  } catch {
-    mediaCache.delete(key);
-    return null;
-  }
-  return entry;
+  return getCachedMedia(mediaCache, key, retentionMs);
 }
 
-function storeCachedMedia(key: string | null, entry: MediaCacheEntry): void {
-  if (!key) return;
-  mediaCache.set(key, entry);
-  pruneMediaCache();
+function storeLocalCachedMedia(key: string | null, entry: MediaCacheEntry): void {
+  storeCachedMedia(mediaCache, key, entry, MEDIA_CACHE_MAX_ENTRIES);
 }
 
 async function startAgentForApp(params: {
@@ -848,7 +623,7 @@ async function processAppMessage(params: {
       if (mediaId) {
         try {
           const cacheKey = buildMediaCacheKey({ mediaId });
-          const cached = await getCachedMedia(cacheKey, retentionMs);
+          const cached = await getLocalCachedMedia(cacheKey, retentionMs);
           if (cached) {
             mediaContext = { type: cached.type, path: cached.path, mimeType: cached.mimeType, url: cached.url };
             logVerbose(target, `app voice cache hit: ${cached.path}`);
@@ -871,7 +646,7 @@ async function processAppMessage(params: {
               await writeFile(tempVoicePath, media.buffer);
               const mimeType = media.contentType || "audio/amr";
               mediaContext = { type: "voice", path: tempVoicePath, mimeType };
-              storeCachedMedia(cacheKey, {
+              storeLocalCachedMedia(cacheKey, {
                 path: tempVoicePath,
                 type: "voice",
                 mimeType,
@@ -906,7 +681,7 @@ async function processAppMessage(params: {
     const maxBytes = resolveMediaMaxBytes(target);
     try {
       const cacheKey = buildMediaCacheKey({ mediaId, url: picUrl });
-      const cached = await getCachedMedia(cacheKey, retentionMs);
+      const cached = await getLocalCachedMedia(cacheKey, retentionMs);
       if (cached) {
         mediaContext = { type: cached.type, path: cached.path, mimeType: cached.mimeType, url: cached.url };
         logVerbose(target, `app image cache hit: ${cached.path}`);
@@ -951,7 +726,7 @@ async function processAppMessage(params: {
               ? await describeImageWithVision({ config: visionConfig, buffer, mimeType })
               : null;
 
-            storeCachedMedia(cacheKey, {
+            storeLocalCachedMedia(cacheKey, {
               path: tempImagePath,
               type: "image",
               mimeType,
@@ -961,7 +736,7 @@ async function processAppMessage(params: {
               size: buffer.length,
             });
             if (visionConfig && !summary) {
-              await appendOperationLog(target, {
+              await appendOperationLog(target.account.config.operations?.logPath, {
                 action: "vision-image-failed",
                 accountId: target.account.accountId,
                 path: tempImagePath,
@@ -999,7 +774,7 @@ async function processAppMessage(params: {
     if (mediaId) {
       try {
         const cacheKey = buildMediaCacheKey({ mediaId });
-        const cached = await getCachedMedia(cacheKey, retentionMs);
+        const cached = await getLocalCachedMedia(cacheKey, retentionMs);
         if (cached) {
           mediaContext = { type: cached.type, path: cached.path, mimeType: cached.mimeType, url: cached.url };
           logVerbose(target, `app video cache hit: ${cached.path}`);
@@ -1022,7 +797,7 @@ async function processAppMessage(params: {
             await writeFile(tempVideoPath, media.buffer);
             const mimeType = media.contentType || "video/mp4";
             mediaContext = { type: "video", path: tempVideoPath, mimeType };
-            storeCachedMedia(cacheKey, {
+            storeLocalCachedMedia(cacheKey, {
               path: tempVideoPath,
               type: "video",
               mimeType,
@@ -1058,7 +833,7 @@ async function processAppMessage(params: {
     if (mediaId) {
       try {
         const cacheKey = buildMediaCacheKey({ mediaId });
-        const cached = await getCachedMedia(cacheKey, retentionMs);
+        const cached = await getLocalCachedMedia(cacheKey, retentionMs);
         if (cached) {
           mediaContext = { type: cached.type, path: cached.path, mimeType: cached.mimeType, url: cached.url };
           logVerbose(target, `app file cache hit: ${cached.path}`);
@@ -1089,7 +864,7 @@ async function processAppMessage(params: {
             await writeFile(tempFilePath, media.buffer);
             const mimeType = media.contentType || "application/octet-stream";
             mediaContext = { type: "file", path: tempFilePath, mimeType };
-            storeCachedMedia(cacheKey, {
+            storeLocalCachedMedia(cacheKey, {
               path: tempFilePath,
               type: "file",
               mimeType,
@@ -1223,7 +998,7 @@ export async function handleWecomPushRequest(params: {
   }
 
   const url = new URL(req.url ?? "/", "http://localhost");
-  const accountId = pickFirstString(payload?.accountId, url.searchParams.get("accountId"));
+  const accountId = pickString(payload?.accountId, url.searchParams.get("accountId"));
   const target = selectPushTarget(targets, accountId);
   if (!target) {
     res.statusCode = 404;
@@ -1233,7 +1008,7 @@ export async function handleWecomPushRequest(params: {
   }
 
   const expectedToken = resolvePushToken(target);
-  const requestToken = pickFirstString(
+  const requestToken = pickString(
     payload?.token,
     url.searchParams.get("token"),
     resolveHeaderToken(req),
@@ -1245,8 +1020,8 @@ export async function handleWecomPushRequest(params: {
     return true;
   }
 
-  const toUser = pickFirstString(payload?.toUser, url.searchParams.get("toUser"));
-  const chatId = pickFirstString(payload?.chatId, url.searchParams.get("chatId"));
+  const toUser = pickString(payload?.toUser, url.searchParams.get("toUser"));
+  const chatId = pickString(payload?.chatId, url.searchParams.get("chatId"));
   if (!toUser && !chatId) {
     res.statusCode = 400;
     res.setHeader("Content-Type", "application/json; charset=utf-8");
@@ -1300,7 +1075,7 @@ export async function handleWecomPushRequest(params: {
         } else {
           await sendWecomFile({ account: target.account, toUser, chatId: chatId || undefined, mediaId });
         }
-        await appendOperationLog(target, {
+        await appendOperationLog(target.account.config.operations?.logPath, {
           action: "push-media",
           accountId: target.account.accountId,
           toUser,
@@ -1314,7 +1089,7 @@ export async function handleWecomPushRequest(params: {
       const text = markdownToWecomText(message.text ?? "");
       if (text) {
         await sendWecomText({ account: target.account, toUser, chatId: chatId || undefined, text });
-        await appendOperationLog(target, {
+        await appendOperationLog(target.account.config.operations?.logPath, {
           action: "push-text",
           accountId: target.account.accountId,
           toUser,

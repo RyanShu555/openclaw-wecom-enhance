@@ -4,8 +4,6 @@ English | [中文](README.zh.md)
 
 OpenClaw WeCom plugin supporting **Bot API mode** and **Internal App mode** with multi-account, media, and group chat.
 
-> `docs/TECHNICAL.md` is the source of truth. Read it before development.
-
 ## Features
 - Dual mode: Bot API (JSON callback + stream) / App (XML callback + ACK + proactive send)
 - Multi-account: `channels.wecom.accounts`
@@ -15,8 +13,9 @@ OpenClaw WeCom plugin supporting **Bot API mode** and **Internal App mode** with
 - Group chat: uses `appchat/send` when `chatId` is present
 - Advanced: folder zip sending, send queue, operation logs, media auto recognition
 
-## Install
-### npm
+## Installation
+
+### npm (Recommended)
 ```bash
 openclaw plugins install @marshulll/openclaw-wecom
 openclaw plugins enable openclaw-wecom
@@ -24,7 +23,7 @@ openclaw gateway restart
 ```
 > The npm package **bundles dependencies** (no extra `npm install` on the server).
 
-### Local path
+### Local Path
 ```bash
 openclaw plugins install --link /path/to/openclaw-wecom
 openclaw plugins enable openclaw-wecom
@@ -33,82 +32,133 @@ openclaw gateway restart
 > For local path installs, run `npm install` in the project directory first.
 
 ## Configuration
-Write config to `~/.openclaw/openclaw.json`.  
-Recommended: use main config only; env vars are fallback.
 
-Minimal example: `docs/wecom.config.example.json`  
-Full example: `docs/wecom.config.full.example.json`  
-Install guide: `docs/INSTALL.md`
+Write config to `~/.openclaw/openclaw.json`
 
-### Minimal config
+- Minimal example: `docs/wecom.config.example.json`
+- Full example: `docs/wecom.config.full.example.jsonc` (with comments)
+
+> Recommendation: use **separate webhookPath** for Bot and App (e.g. `/wecom/bot` and `/wecom/app`) for clearer debugging.
+
+### Config Example (Dual Mode)
 ```json5
 {
   "channels": {
     "wecom": {
       "enabled": true,
       "mode": "both",
-      "webhookPath": "/wecom",
-      "token": "BOT_TOKEN",
-      "encodingAESKey": "BOT_AES",
-      "receiveId": "BOT_ID",
-      "corpId": "CORP_ID",
-      "corpSecret": "CORP_SECRET",
-      "agentId": 1000001,
-      "callbackToken": "CALLBACK_TOKEN",
-      "callbackAesKey": "CALLBACK_AES"
+      "defaultAccount": "bot",
+      "accounts": {
+        "bot": {
+          "mode": "bot",
+          "webhookPath": "/wecom/bot",
+          "token": "BOT_TOKEN",
+          "encodingAESKey": "BOT_AES",
+          "receiveId": "BOT_ID"
+        },
+        "app": {
+          "mode": "app",
+          "webhookPath": "/wecom/app",
+          "corpId": "CORP_ID",
+          "corpSecret": "CORP_SECRET",
+          "agentId": 1000001,
+          "callbackToken": "CALLBACK_TOKEN",
+          "callbackAesKey": "CALLBACK_AES"
+        }
+      }
     }
   }
 }
 ```
 
-### Key notes
-- Bot mode `receiveId`: recommended to set **Bot ID (aibotid)** for strict crypto validation
-- App mode decryption uses **CorpID** (`corpId`)
+### Key Fields
+| Field | Description |
+|-------|-------------|
+| `receiveId` | Bot mode: **Bot ID (aibotid)** for callback crypto validation |
+| `corpId` | App mode: Corp ID for callback decryption and API calls |
+| `agentId` | App mode: Agent ID (integer) |
 
-## Webhook setup (WeCom Admin)
-### Bot mode
-- URL: `https://your-domain/wecom`
-- Token: custom string
-- EncodingAESKey: generated in admin
-- Bot ID (aibotid): map to `receiveId`
-
-### App mode
-- URL: `https://your-domain/wecom`
-- Token / EncodingAESKey: map to `callbackToken` / `callbackAesKey`
-- CorpID / AgentID / Secret: map to `corpId` / `agentId` / `corpSecret`
-
-> HTTPS is required. Restart OpenClaw gateway after enabling the plugin.
-
-## Modes
+### Mode Options
 - `mode: "bot"`: Bot API only
 - `mode: "app"`: App only
 - `mode: "both"`: both modes (default)
 
-## Media handling
-- App mode: downloads inbound media to local temp dir (`media.tempDir`)
-- Bot inbound media: if webhook provides a media URL, it will be decrypted with `encodingAESKey` and saved locally (no App creds needed)
-- Bot mode media bridge: if reply payload includes `mediaUrl + mediaType`,
-  and App credentials are present, media will be uploaded and sent
-> Bot-only: inbound image/file works via URL decrypt, but outbound media still requires App credentials.
-> Video recognition is verified in App mode; Bot mode is not yet verified/likely unsupported. If you still want to try, enable `media.auto.video` and ensure the webhook payload includes a downloadable video URL, otherwise it falls back to a plain “received video” prompt.
+## Webhook Setup (WeCom Admin)
 
-## Extra commands (App mode)
-- `/sendfile`: send files from server (multiple absolute paths)
-  - Directories are zipped automatically
-  - Example: `/sendfile /tmp/openclaw-wecom /home/shu/Desktop/report.pdf`
-  - Natural language also works: "send me this file image-xxx.jpg" (default match in `media.tempDir`)
-  - Search scope keywords: `桌面` → `~/Desktop`, `下载` → `~/Downloads`, `临时` → `media.tempDir`
-  - If multiple matches are found, a list will be returned for confirmation; reply "more" to paginate
+Both modes require **public HTTPS**. Restart OpenClaw gateway after configuration.
 
-## Proactive send (App mode)
-Push endpoint path: `{webhookPath}/push` (e.g. `/wecom/app/push`).
+### Bot Mode
+- URL: `https://your-domain/wecom/bot`
+- Token / EncodingAESKey: generated in admin, map to `token` / `encodingAESKey`
+- Bot ID (aibotid): map to `receiveId`
 
-- Method: `POST`
-- Auth: `pushToken` (optional but recommended)
-  - Accepts `Authorization: Bearer <token>`, `x-openclaw-token`, query/body `token`
-- Target: `toUser` (DM) or `chatId` (group)
+### App Mode
+- URL: `https://your-domain/wecom/app`
+- Token / EncodingAESKey: generated in admin, map to `callbackToken` / `callbackAesKey`
+- CorpID / AgentID / Secret: map to `corpId` / `agentId` / `corpSecret`
 
-Minimal example (text):
+## Media Handling
+
+### Inbound Media
+- **App mode**: downloads media to local temp dir (configurable via `media.tempDir`)
+- **Bot mode**: if webhook provides media URL, decrypts with `encodingAESKey` and saves locally
+
+### Outbound Media
+- **Requires App credentials** (`corpId/corpSecret/agentId`) to send media
+- Bot mode media bridge: when reply payload contains `mediaUrl + mediaType`, auto uploads and sends
+
+### Image Recognition
+Two recognition methods supported:
+
+1. **Model vision input (default)**: let the model see the image directly
+   - Requires model's `input` to include `"image"` in `~/.openclaw/openclaw.json`
+
+2. **Plugin built-in vision (optional)**: enable `channels.wecom.media.vision.enabled=true`
+   - Plugin generates recognition result first, falls back to model vision on failure
+
+### Video Recognition
+- Requires **ffmpeg** installation
+- Enable: `media.auto.video.enabled=true`
+- Modes: `light` (default, extract few frames) / `full` (extract frames at intervals)
+
+```bash
+# Ubuntu/Debian
+sudo apt-get update && sudo apt-get install -y ffmpeg
+
+# macOS
+brew install ffmpeg
+```
+
+## File Sending
+
+### /sendfile Command (App Mode)
+Send server files, supports multiple absolute paths:
+```
+/sendfile /tmp/openclaw-wecom /home/user/report.pdf
+```
+- Directories: auto-zipped before sending
+- Natural language: `send me this file image-xxx.jpg`
+- Search scope keywords: `桌面` → `~/Desktop`, `下载` → `~/Downloads`
+
+### Agent File Send/Receive (App Mode)
+Let Agent send files via `message` tool (e.g., "send me the file on desktop").
+
+**Prerequisites**:
+1. App mode credentials must be configured
+2. Tool permissions enabled (see "OpenClaw Tool Permissions" below)
+
+**Supported Media Types**:
+| Type | Extensions | Size Limit |
+|------|------------|------------|
+| Image | `.jpg` `.jpeg` `.png` `.gif` `.bmp` `.webp` | 10MB |
+| Voice | `.amr` `.mp3` `.wav` `.m4a` `.ogg` | 2MB |
+| Video | `.mp4` `.mov` `.avi` `.mkv` `.webm` | 10MB |
+| File | All other extensions | 20MB |
+
+## Proactive Push (App Mode)
+
+Endpoint path: `{webhookPath}/push` (e.g. `/wecom/app/push`)
+
 ```bash
 curl -X POST "https://your-domain/wecom/app/push" \
   -H "Content-Type: application/json" \
@@ -116,42 +166,92 @@ curl -X POST "https://your-domain/wecom/app/push" \
   -d '{"toUser":"WenShuJun","text":"Hello"}'
 ```
 
-Media (file/image/voice/video): use `mediaUrl` or `mediaBase64`. You can also send text together.
+| Parameter | Description |
+|-----------|-------------|
+| `toUser` | Target user ID |
+| `chatId` | Target group ID (mutually exclusive with toUser) |
+| `text` | Text content |
+| `mediaUrl` | Media URL (can be sent with text) |
 
-## Unified outbound (OpenClaw console)
-Send messages proactively from the OpenClaw console/CLI (no inbound message required).
+## Unified Outbound (CLI)
 
-- **App mode only** (requires `corpId/corpSecret/agentId`)
-- DM: `--to <userid>` or `--to wecom:<userid>`
-- Group: `--to chat:<chatId>` or `--to group:<chatId>`
-
-Examples:
+Send messages via OpenClaw CLI:
 ```bash
 openclaw send --channel wecom --to WenShuJun "Hello"
 openclaw send --channel wecom --to chat:CHAT_ID "Group test"
 ```
 
-## Media auto recognition (optional)
-- **Voice send/receive does NOT require API**; only auto transcription needs an OpenAI-compatible API
-- **Video recognition requires ffmpeg** (install on server, then set `media.auto.video.enabled = true`)
-- Video recognition supports **light / full** modes (default: light) via `media.auto.video.mode`
-- Small text files can be previewed automatically
+## OpenClaw Tool Permissions
 
-## Send queue & operation logs (optional)
-- `sendQueue.intervalMs`: delay between /sendfile items to avoid rate limit
-- `operations.logPath`: JSONL log for file sending and push actions
+To allow Agent to execute local commands (view files, run scripts, etc.), configure tool permissions.
+
+### 1. Add tools config
+
+Add to `~/.openclaw/openclaw.json`:
+
+```json
+{
+  "tools": {
+    "profile": "full",
+    "allow": ["*"],
+    "elevated": {
+      "enabled": true,
+      "allowFrom": { "webchat": ["*"] }
+    },
+    "exec": {
+      "host": "gateway",
+      "security": "full",
+      "ask": "off"
+    }
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "bash": true,
+    "useAccessGroups": false
+  },
+  "agents": {
+    "defaults": {
+      "workspace": "~/.openclaw/workspace",
+      "elevatedDefault": "full",
+      "sandbox": { "mode": "off", "workspaceAccess": "rw" }
+    }
+  }
+}
+```
+
+### 2. Add command allowlist
+
+```bash
+openclaw approvals allowlist add --agent '*' '*'
+```
+
+> **Security Note**: The above config grants Agent full command execution permissions. For production, restrict allowed commands.
+
+### 3. Restart Gateway
+
+```bash
+openclaw gateway restart
+```
+
+### Verify Configuration
+
+Test in WeCom:
+- "Show me what files are on the desktop"
+- "Run ls -la command"
 
 ## Troubleshooting
-- Callback verification failed: check Token / AESKey / URL
-- No reply: ensure plugin enabled and gateway restarted
-- Media too large: adjust `media.maxBytes` or send smaller files
-- invalid access_token: verify `corpId/corpSecret/agentId`
-- Plugin failed to load due to missing deps: upgrade to latest and install via npm
 
-## Docs
-- Dev doc: `docs/TECHNICAL.md`
-- Install: `docs/INSTALL.md`
-- Examples: `docs/wecom.config.example.json` / `docs/wecom.config.full.example.json`
-- Testing: `docs/TESTING.md`
+| Issue | Solution |
+|-------|----------|
+| Callback verification failed | Check Token / AESKey / URL consistency |
+| No reply | Ensure plugin enabled and gateway restarted |
+| Media too large | Adjust `media.maxBytes` or send smaller files |
+| invalid access_token | Verify `corpId/corpSecret/agentId` |
+| Agent cannot execute commands | Check `tools` config and allowlist |
+| `errcode=60020` | WeCom IP whitelist issue, add server egress IP (`curl -s https://ipinfo.io/ip`) |
 
-Recommendation: use **separate webhookPath** for Bot and App (e.g. `/wecom/bot` and `/wecom/app`) for clearer debugging and fewer callback mix-ups.
+## Documentation
+- Dev docs: `docs/TECHNICAL.md`
+- Config examples: `docs/wecom.config.example.json` / `docs/wecom.config.full.example.jsonc`
+- Testing checklist: `docs/TESTING.md`

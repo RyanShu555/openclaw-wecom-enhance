@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import crypto from "node:crypto";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { basename, extname, join } from "node:path";
+import { mkdir, stat, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 
 import type { PluginRuntime } from "openclaw/plugin-sdk";
 
@@ -15,7 +15,6 @@ import {
   verifyWecomSignature,
 } from "./crypto.js";
 import {
-  MEDIA_TOO_LARGE_ERROR,
   downloadWecomMedia,
   fetchMediaFromUrl,
   sendWecomFile,
@@ -42,6 +41,30 @@ import {
   resolveMediaTempDir,
   sanitizeFilename,
 } from "./media-utils.js";
+import {
+  jsonOk,
+  readJsonBody,
+  resolveQueryParams,
+  resolveSignatureParam,
+} from "./shared/http-utils.js";
+import {
+  pickString,
+  truncateUtf8Bytes,
+} from "./shared/string-utils.js";
+import {
+  buildInboundMediaPrompt,
+  isMediaTooLargeError,
+  loadOutboundMedia,
+  mediaFallbackExt,
+  mediaFallbackLabel,
+  mediaSentLabel,
+  normalizeMediaType,
+  parseBase64Input,
+  type MediaType,
+} from "./shared/media-shared.js";
+import {
+  buildMediaCacheKey,
+} from "./shared/cache-utils.js";
 
 const STREAM_TTL_MS = 10 * 60 * 1000;
 const STREAM_MAX_BYTES = 20_480;
@@ -79,6 +102,42 @@ type InboundBody = {
 const streams = new Map<string, StreamState>();
 const msgidToStreamId = new Map<string, string>();
 const recentEncrypts = new Map<string, { ts: number; streamId?: string }>();
+
+function pruneMediaCache(): void {
+  if (mediaCache.size <= MEDIA_CACHE_MAX_ENTRIES) return;
+  const entries = Array.from(mediaCache.entries())
+    .sort((a, b) => a[1].createdAt - b[1].createdAt);
+  const excess = entries.length - MEDIA_CACHE_MAX_ENTRIES;
+  for (let i = 0; i < excess; i += 1) {
+    mediaCache.delete(entries[i]![0]);
+  }
+}
+
+async function getCachedMedia(
+  key: string | null,
+  retentionMs?: number,
+): Promise<{ media: InboundMedia; summary?: string } | null> {
+  if (!key) return null;
+  const cached = mediaCache.get(key);
+  if (!cached) return null;
+  if (retentionMs && Date.now() - cached.createdAt > retentionMs) {
+    mediaCache.delete(key);
+    return null;
+  }
+  try {
+    await stat(cached.entry.path);
+  } catch {
+    mediaCache.delete(key);
+    return null;
+  }
+  return { media: cached.entry, summary: cached.summary };
+}
+
+function storeCachedMedia(key: string | null, entry: InboundMedia, size: number, summary?: string): void {
+  if (!key) return;
+  mediaCache.set(key, { entry, createdAt: Date.now(), size, summary });
+  pruneMediaCache();
+}
 
 function pruneStreams(): void {
   const cutoff = Date.now() - STREAM_TTL_MS;
@@ -118,50 +177,6 @@ function pruneStreams(): void {
   }
 }
 
-function truncateUtf8Bytes(text: string, maxBytes: number): string {
-  const buf = Buffer.from(text, "utf8");
-  if (buf.length <= maxBytes) return text;
-  const slice = buf.subarray(buf.length - maxBytes);
-  return slice.toString("utf8");
-}
-
-
-function jsonOk(res: ServerResponse, body: unknown): void {
-  res.statusCode = 200;
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.end(JSON.stringify(body));
-}
-
-async function readJsonBody(req: IncomingMessage, maxBytes: number) {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  return await new Promise<{ ok: boolean; value?: unknown; error?: string }>((resolve) => {
-    req.on("data", (chunk: Buffer) => {
-      total += chunk.length;
-      if (total > maxBytes) {
-        resolve({ ok: false, error: "payload too large" });
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on("end", () => {
-      try {
-        const raw = Buffer.concat(chunks).toString("utf8");
-        if (!raw.trim()) {
-          resolve({ ok: false, error: "empty payload" });
-          return;
-        }
-        resolve({ ok: true, value: JSON.parse(raw) as unknown });
-      } catch (err) {
-        resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
-      }
-    });
-    req.on("error", (err) => {
-      resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
-    });
-  });
-}
 
 function buildEncryptedJsonReply(params: {
   account: ResolvedWecomAccount;
@@ -187,42 +202,6 @@ function buildEncryptedJsonReply(params: {
     timestamp: params.timestamp,
     nonce: params.nonce,
   };
-}
-
-function resolveQueryParams(req: IncomingMessage): URLSearchParams {
-  const rawUrl = req.url ?? "";
-  const queryIndex = rawUrl.indexOf("?");
-  if (queryIndex < 0) return new URLSearchParams();
-  const queryString = rawUrl.slice(queryIndex + 1);
-  const params = new URLSearchParams();
-  if (!queryString) return params;
-  for (const part of queryString.split("&")) {
-    if (!part) continue;
-    const eqIndex = part.indexOf("=");
-    const keyRaw = eqIndex >= 0 ? part.slice(0, eqIndex) : part;
-    const valueRaw = eqIndex >= 0 ? part.slice(eqIndex + 1) : "";
-    const key = safeDecodeURIComponent(keyRaw);
-    const value = safeDecodeURIComponent(valueRaw);
-    params.append(key, value);
-  }
-  return params;
-}
-
-function safeDecodeURIComponent(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-function resolveSignatureParam(params: URLSearchParams): string {
-  return (
-    params.get("msg_signature") ??
-    params.get("msgsignature") ??
-    params.get("signature") ??
-    ""
-  );
 }
 
 function buildStreamPlaceholderReply(streamId: string): { msgtype: "stream"; stream: { id: string; finish: boolean; content: string } } {
@@ -492,25 +471,6 @@ async function startAgentForStream(params: {
   }
 }
 
-function pickString(...values: unknown[]): string {
-  for (const value of values) {
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  return "";
-}
-
-function isMediaTooLargeError(err: unknown): boolean {
-  if (!err) return false;
-  if (typeof err === "string") return err.includes(MEDIA_TOO_LARGE_ERROR);
-  if (typeof err === "object") {
-    const anyErr = err as { code?: string; message?: string };
-    if (anyErr.code === MEDIA_TOO_LARGE_ERROR) return true;
-    if (typeof anyErr.message === "string" && anyErr.message.includes(MEDIA_TOO_LARGE_ERROR)) return true;
-    if (typeof anyErr.message === "string" && anyErr.message.toLowerCase().includes("media too large")) return true;
-  }
-  return false;
-}
-
 function resolveBotMediaUrl(msg: any, msgtype: "image" | "voice" | "video" | "file"): string {
   if (!msg || typeof msg !== "object") return "";
   const block = msg[msgtype] ?? {};
@@ -627,13 +587,7 @@ async function buildBotMediaMessage(params: {
 }): Promise<InboundBody> {
   const { target, msgtype, url, base64, mediaId, filename } = params;
 
-  const fallbackLabel = msgtype === "image"
-    ? "[image]"
-    : msgtype === "voice"
-      ? "[voice]"
-      : msgtype === "video"
-        ? "[video]"
-        : "[file]";
+  const fallbackLabel = mediaFallbackLabel(msgtype);
 
   if (!url && !base64 && !mediaId) return { text: fallbackLabel };
   const hasAppCreds = Boolean(target.account.corpId && target.account.corpSecret && target.account.agentId);
@@ -727,14 +681,7 @@ async function buildBotMediaMessage(params: {
       target.account.config.media?.cleanupOnStart,
     );
 
-    const fallbackExt = msgtype === "image"
-      ? "jpg"
-      : msgtype === "voice"
-        ? "amr"
-        : msgtype === "video"
-          ? "mp4"
-          : "bin";
-    const ext = resolveExtFromContentType(contentType, fallbackExt);
+    const ext = resolveExtFromContentType(contentType, mediaFallbackExt(msgtype));
 
     if (msgtype === "file") {
       const safeName = sanitizeFilename(filename || "", `file-${Date.now()}.${ext}`);
@@ -906,210 +853,6 @@ async function buildInboundBody(params: { target: WecomWebhookTarget; msg: Wecom
     return { text: id ? `[stream_refresh] ${id}` : "[stream_refresh]" };
   }
   return { text: msgtype ? `[${msgtype}]` : "" };
-}
-
-function normalizeMediaType(raw?: string): "image" | "voice" | "video" | "file" | null {
-  if (!raw) return null;
-  const value = raw.toLowerCase();
-  if (value === "image" || value === "voice" || value === "video" || value === "file") return value;
-  return null;
-}
-
-function resolveContentTypeFromExt(ext: string): string {
-  const value = ext.toLowerCase();
-  if (value === "png") return "image/png";
-  if (value === "gif") return "image/gif";
-  if (value === "jpg" || value === "jpeg") return "image/jpeg";
-  if (value === "webp") return "image/webp";
-  if (value === "bmp") return "image/bmp";
-  if (value === "amr") return "audio/amr";
-  if (value === "wav") return "audio/wav";
-  if (value === "mp3") return "audio/mpeg";
-  if (value === "m4a") return "audio/mp4";
-  if (value === "mp4") return "video/mp4";
-  if (value === "mov") return "video/quicktime";
-  if (value === "avi") return "video/x-msvideo";
-  if (value === "pdf") return "application/pdf";
-  if (value === "txt") return "text/plain";
-  if (value === "csv") return "text/csv";
-  if (value === "json") return "application/json";
-  if (value === "doc") return "application/msword";
-  if (value === "docx") return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-  if (value === "xls") return "application/vnd.ms-excel";
-  if (value === "xlsx") return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-  if (value === "ppt") return "application/vnd.ms-powerpoint";
-  if (value === "pptx") return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
-  if (value === "zip") return "application/zip";
-  return "application/octet-stream";
-}
-
-function resolveMediaTypeFromContentType(contentType: string): "image" | "voice" | "video" | "file" {
-  const value = contentType.toLowerCase();
-  if (value.startsWith("image/")) return "image";
-  if (value.startsWith("audio/")) return "voice";
-  if (value.startsWith("video/")) return "video";
-  return "file";
-}
-
-function stripFileProtocol(rawPath: string): string {
-  return rawPath.startsWith("file://") ? rawPath.replace(/^file:\/\//, "") : rawPath;
-}
-
-function parseBase64Input(input: string): { data: string; mimeType?: string } {
-  const match = input.match(/^data:([^;]+);base64,(.*)$/i);
-  if (match) {
-    return { data: match[2], mimeType: match[1] };
-  }
-  return { data: input };
-}
-
-function resolveOutboundMediaSpec(payload: any): {
-  type?: string;
-  url?: string;
-  path?: string;
-  base64?: string;
-  filename?: string;
-  mimeType?: string;
-} | null {
-  if (!payload || typeof payload !== "object") return null;
-  const mediaBlockRaw = payload.media ?? payload.attachment ?? payload.file ?? payload.files;
-  const mediaBlock = Array.isArray(mediaBlockRaw) ? mediaBlockRaw[0] : mediaBlockRaw;
-  const url = pickString(
-    payload.mediaUrl,
-    mediaBlock?.url,
-    mediaBlock?.mediaUrl,
-    mediaBlock?.fileUrl,
-    mediaBlock?.file_url,
-  );
-  const path = pickString(
-    payload.mediaPath,
-    payload.filePath,
-    mediaBlock?.path,
-    mediaBlock?.filePath,
-    mediaBlock?.localPath,
-  );
-  const base64 = pickString(
-    payload.mediaBase64,
-    payload.base64,
-    mediaBlock?.base64,
-    mediaBlock?.data,
-  );
-  const type = pickString(payload.mediaType, mediaBlock?.type, mediaBlock?.mediaType);
-  const filename = pickString(payload.filename, payload.fileName, mediaBlock?.filename, mediaBlock?.fileName, mediaBlock?.name);
-  const mimeType = pickString(payload.mimeType, payload.mediaMimeType, mediaBlock?.mimeType, mediaBlock?.contentType);
-  let finalUrl = url;
-  let finalPath = path;
-  if (!finalPath && finalUrl && (finalUrl.startsWith("/") || finalUrl.startsWith("file://"))) {
-    finalPath = finalUrl;
-    finalUrl = "";
-  }
-  if (!finalUrl && !finalPath && !base64) return null;
-  return { type, url: finalUrl, path: finalPath, base64, filename, mimeType };
-}
-
-async function loadOutboundMedia(params: {
-  payload: any;
-  account: ResolvedWecomAccount;
-  maxBytes: number | undefined;
-}): Promise<{ buffer: Buffer; contentType: string; type: "image" | "voice" | "video" | "file"; filename: string } | null> {
-  const spec = resolveOutboundMediaSpec(params.payload);
-  if (!spec) return null;
-
-  let buffer: Buffer | null = null;
-  let contentType = spec.mimeType ?? "";
-  let filename = spec.filename ?? "";
-
-  if (spec.base64) {
-    const parsed = parseBase64Input(spec.base64);
-    buffer = Buffer.from(parsed.data, "base64");
-    if (!contentType && parsed.mimeType) contentType = parsed.mimeType;
-  } else if (spec.path) {
-    const resolvedPath = stripFileProtocol(spec.path);
-    buffer = await readFile(resolvedPath);
-    if (!filename) filename = basename(resolvedPath);
-    if (!contentType) {
-      const ext = extname(resolvedPath).replace(".", "");
-      contentType = resolveContentTypeFromExt(ext);
-    }
-  } else if (spec.url) {
-    const media = await fetchMediaFromUrl(spec.url, params.account, params.maxBytes);
-    buffer = media.buffer;
-    if (!contentType) contentType = media.contentType;
-  }
-
-  if (!buffer) return null;
-  if (params.maxBytes && buffer.length > params.maxBytes) return null;
-
-  const type = normalizeMediaType(spec.type) ?? resolveMediaTypeFromContentType(contentType || "application/octet-stream");
-  const ext = resolveExtFromContentType(contentType || "application/octet-stream", type);
-  const safeName = sanitizeFilename(filename, `${type}.${ext}`);
-
-  return { buffer, contentType: contentType || resolveContentTypeFromExt(ext), type, filename: safeName };
-}
-
-function mediaSentLabel(type: string): string {
-  if (type === "image") return "[已发送图片]";
-  if (type === "voice") return "[已发送语音]";
-  if (type === "video") return "[已发送视频]";
-  if (type === "file") return "[已发送文件]";
-  return "[已发送媒体]";
-}
-
-function hashCacheKey(input: string): string {
-  return crypto.createHash("sha1").update(input).digest("hex");
-}
-
-function buildMediaCacheKey(params: { url?: string; base64?: string; mediaId?: string }): string | null {
-  if (params.mediaId) return `media:${params.mediaId}`;
-  if (params.url) return `url:${hashCacheKey(params.url)}`;
-  if (params.base64) return `b64:${hashCacheKey(params.base64)}`;
-  return null;
-}
-
-function pruneMediaCache(): void {
-  if (mediaCache.size <= MEDIA_CACHE_MAX_ENTRIES) return;
-  const entries = Array.from(mediaCache.entries())
-    .sort((a, b) => a[1].createdAt - b[1].createdAt);
-  const excess = entries.length - MEDIA_CACHE_MAX_ENTRIES;
-  for (let i = 0; i < excess; i += 1) {
-    mediaCache.delete(entries[i]![0]);
-  }
-}
-
-async function getCachedMedia(
-  key: string | null,
-  retentionMs?: number,
-): Promise<{ media: InboundMedia; summary?: string } | null> {
-  if (!key) return null;
-  const cached = mediaCache.get(key);
-  if (!cached) return null;
-  if (retentionMs && Date.now() - cached.createdAt > retentionMs) {
-    mediaCache.delete(key);
-    return null;
-  }
-  try {
-    await stat(cached.entry.path);
-  } catch {
-    mediaCache.delete(key);
-    return null;
-  }
-  return { media: cached.entry, summary: cached.summary };
-}
-
-function storeCachedMedia(key: string | null, entry: InboundMedia, size: number, summary?: string): void {
-  if (!key) return;
-  mediaCache.set(key, { entry, createdAt: Date.now(), size, summary });
-  pruneMediaCache();
-}
-
-function buildInboundMediaPrompt(msgtype: "image" | "voice" | "video" | "file", filename?: string): string {
-  if (msgtype === "image") {
-    return "[用户发送了一张图片]\n\n请直接根据图片内容回复用户（图片将作为视觉输入提供；无需使用 Read 工具读取图片文件）。";
-  }
-  if (msgtype === "voice") return "[用户发送了一条语音消息]\n\n请根据语音内容回复用户。";
-  if (msgtype === "video") return "[用户发送了一个视频文件]\n\n请根据视频内容回复用户。";
-  const label = filename ? `用户发送了一个文件: ${filename}` : "用户发送了一个文件";
-  return `[${label}]\n\n请根据文件内容回复用户。`;
 }
 
 function shouldHandleBot(account: ResolvedWecomAccount): boolean {

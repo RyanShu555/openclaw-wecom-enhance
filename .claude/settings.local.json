@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ssh aotu@192.168.1.142 \"cat /tmp/openclaw/openclaw-2026-02-02.log | grep -E ''09:2[67]|09:28'' | tail -100\")"
+    ]
+  }
+}

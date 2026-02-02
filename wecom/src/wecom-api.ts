@@ -125,8 +125,8 @@ function ensureNotTooLarge(res: Response, maxBytes?: number): void {
 }
 
 export async function getWecomAccessToken(account: ResolvedWecomAccount): Promise<string> {
-  const { corpId, corpSecret } = ensureAppConfig(account);
-  const cacheKey = corpId;
+  const { corpId, corpSecret, agentId } = ensureAppConfig(account);
+  const cacheKey = `${corpId}:${agentId}`;
   let cache = accessTokenCaches.get(cacheKey);
 
   if (!cache) {
@@ -231,64 +231,68 @@ export async function uploadWecomMedia(params: {
   return json.media_id;
 }
 
+export type MediaType = "image" | "voice" | "video" | "file";
+
+/**
+ * 通用媒体发送函数
+ */
+export async function sendWecomMedia(params: {
+  account: ResolvedWecomAccount;
+  toUser: string;
+  chatId?: string;
+  mediaId: string;
+  mediaType: MediaType;
+  title?: string;
+  description?: string;
+}): Promise<void> {
+  const { account, toUser, chatId, mediaId, mediaType, title, description } = params;
+  const { agentId } = ensureAppConfig(account);
+  const accessToken = await getWecomAccessToken(account);
+  const useChat = Boolean(chatId);
+  const sendUrl = useChat
+    ? `https://qyapi.weixin.qq.com/cgi-bin/appchat/send?access_token=${encodeURIComponent(accessToken)}`
+    : `https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${encodeURIComponent(accessToken)}`;
+
+  const mediaPayload = mediaType === "video"
+    ? { media_id: mediaId, title: title ?? "Video", description: description ?? "" }
+    : { media_id: mediaId };
+
+  const body = useChat
+    ? { chatid: chatId, msgtype: mediaType, [mediaType]: mediaPayload }
+    : { touser: toUser, msgtype: mediaType, agentid: agentId, [mediaType]: mediaPayload };
+
+  const sendRes = await fetchWithRetry(account, sendUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const sendJson = await sendRes.json();
+  if (sendJson?.errcode !== 0) {
+    throw new Error(`WeCom ${mediaType} send failed: ${JSON.stringify(sendJson)}`);
+  }
+}
+
+// 便捷方法：发送图片
 export async function sendWecomImage(params: {
   account: ResolvedWecomAccount;
   toUser: string;
   chatId?: string;
   mediaId: string;
 }): Promise<void> {
-  const { account, toUser, chatId, mediaId } = params;
-  const { agentId } = ensureAppConfig(account);
-  const accessToken = await getWecomAccessToken(account);
-  const useChat = Boolean(chatId);
-  const sendUrl = useChat
-    ? `https://qyapi.weixin.qq.com/cgi-bin/appchat/send?access_token=${encodeURIComponent(accessToken)}`
-    : `https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${encodeURIComponent(accessToken)}`;
-
-  const body = useChat
-    ? { chatid: chatId, msgtype: "image", image: { media_id: mediaId } }
-    : { touser: toUser, msgtype: "image", agentid: agentId, image: { media_id: mediaId } };
-
-  const sendRes = await fetchWithRetry(account, sendUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const sendJson = await sendRes.json();
-  if (sendJson?.errcode !== 0) {
-    throw new Error(`WeCom image send failed: ${JSON.stringify(sendJson)}`);
-  }
+  return sendWecomMedia({ ...params, mediaType: "image" });
 }
 
+// 便捷方法：发送语音
 export async function sendWecomVoice(params: {
   account: ResolvedWecomAccount;
   toUser: string;
   chatId?: string;
   mediaId: string;
 }): Promise<void> {
-  const { account, toUser, chatId, mediaId } = params;
-  const { agentId } = ensureAppConfig(account);
-  const accessToken = await getWecomAccessToken(account);
-  const useChat = Boolean(chatId);
-  const sendUrl = useChat
-    ? `https://qyapi.weixin.qq.com/cgi-bin/appchat/send?access_token=${encodeURIComponent(accessToken)}`
-    : `https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${encodeURIComponent(accessToken)}`;
-
-  const body = useChat
-    ? { chatid: chatId, msgtype: "voice", voice: { media_id: mediaId } }
-    : { touser: toUser, msgtype: "voice", agentid: agentId, voice: { media_id: mediaId } };
-
-  const sendRes = await fetchWithRetry(account, sendUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const sendJson = await sendRes.json();
-  if (sendJson?.errcode !== 0) {
-    throw new Error(`WeCom voice send failed: ${JSON.stringify(sendJson)}`);
-  }
+  return sendWecomMedia({ ...params, mediaType: "voice" });
 }
 
+// 便捷方法：发送视频
 export async function sendWecomVideo(params: {
   account: ResolvedWecomAccount;
   toUser: string;
@@ -297,57 +301,17 @@ export async function sendWecomVideo(params: {
   title?: string;
   description?: string;
 }): Promise<void> {
-  const { account, toUser, chatId, mediaId, title, description } = params;
-  const { agentId } = ensureAppConfig(account);
-  const accessToken = await getWecomAccessToken(account);
-  const useChat = Boolean(chatId);
-  const sendUrl = useChat
-    ? `https://qyapi.weixin.qq.com/cgi-bin/appchat/send?access_token=${encodeURIComponent(accessToken)}`
-    : `https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${encodeURIComponent(accessToken)}`;
-
-  const video = { media_id: mediaId, title: title ?? "Video", description: description ?? "" };
-  const body = useChat
-    ? { chatid: chatId, msgtype: "video", video }
-    : { touser: toUser, msgtype: "video", agentid: agentId, video };
-
-  const sendRes = await fetchWithRetry(account, sendUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const sendJson = await sendRes.json();
-  if (sendJson?.errcode !== 0) {
-    throw new Error(`WeCom video send failed: ${JSON.stringify(sendJson)}`);
-  }
+  return sendWecomMedia({ ...params, mediaType: "video" });
 }
 
+// 便捷方法：发送文件
 export async function sendWecomFile(params: {
   account: ResolvedWecomAccount;
   toUser: string;
   chatId?: string;
   mediaId: string;
 }): Promise<void> {
-  const { account, toUser, chatId, mediaId } = params;
-  const { agentId } = ensureAppConfig(account);
-  const accessToken = await getWecomAccessToken(account);
-  const useChat = Boolean(chatId);
-  const sendUrl = useChat
-    ? `https://qyapi.weixin.qq.com/cgi-bin/appchat/send?access_token=${encodeURIComponent(accessToken)}`
-    : `https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${encodeURIComponent(accessToken)}`;
-
-  const body = useChat
-    ? { chatid: chatId, msgtype: "file", file: { media_id: mediaId } }
-    : { touser: toUser, msgtype: "file", agentid: agentId, file: { media_id: mediaId } };
-
-  const sendRes = await fetchWithRetry(account, sendUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const sendJson = await sendRes.json();
-  if (sendJson?.errcode !== 0) {
-    throw new Error(`WeCom file send failed: ${JSON.stringify(sendJson)}`);
-  }
+  return sendWecomMedia({ ...params, mediaType: "file" });
 }
 
 export async function downloadWecomMedia(params: {

@@ -3,17 +3,25 @@
     "wecom": {
       "enabled": true,
       "mode": "both",
-      "webhookPath": "/wecom",
-
-      "token": "BOT_TOKEN",
-      "encodingAESKey": "BOT_AES",
-      "receiveId": "BOT_ID",
-
-      "corpId": "CORP_ID",
-      "corpSecret": "CORP_SECRET",
-      "agentId": 1000001,
-      "callbackToken": "CALLBACK_TOKEN",
-      "callbackAesKey": "CALLBACK_AES"
+      "defaultAccount": "bot",
+      "accounts": {
+        "bot": {
+          "mode": "bot",
+          "webhookPath": "/wecom/bot",
+          "token": "YOUR_BOT_TOKEN",
+          "encodingAESKey": "YOUR_BOT_AES_KEY",
+          "receiveId": "YOUR_BOT_ID"
+        },
+        "app": {
+          "mode": "app",
+          "webhookPath": "/wecom/app",
+          "corpId": "YOUR_CORP_ID",
+          "corpSecret": "YOUR_CORP_SECRET",
+          "agentId": 1000001,
+          "callbackToken": "YOUR_CALLBACK_TOKEN",
+          "callbackAesKey": "YOUR_CALLBACK_AES_KEY"
+        }
+      }
     }
   }
 }

@@ -1,7 +1,7 @@
-import { readFile, stat, writeFile, mkdtemp, rm, readdir } from "node:fs/promises";
+import { readFile, stat, mkdtemp, rm, readdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { tmpdir } from "node:os";
-import { basename, extname, join } from "node:path";
+import { extname, join } from "node:path";
 
 import type { WecomAccountConfig } from "./types.js";
 import { describeImageWithVision, resolveVisionConfig } from "./media-vision.js";
@@ -252,55 +252,35 @@ export async function summarizeVideoWithVision(params: {
   if (!visionConfig) return null;
 
   const tempDir = await mkdtemp(join(tmpdir(), "openclaw-wecom-frame-"));
-  const framePath = join(tempDir, `${basename(params.videoPath)}.jpg`);
   try {
+    // 根据模式计算 fps
+    const fps = params.cfg.mode === "light"
+      ? Math.max(0.05, params.cfg.frames / Math.max(params.cfg.maxDurationSec, 1))
+      : Math.max(0.1, 1 / Math.max(params.cfg.intervalSec, 1));
+
+    await runFfmpegExtractFrames({
+      ffmpegPath: params.cfg.ffmpegPath,
+      videoPath: params.videoPath,
+      outputPattern: join(tempDir, "frame-%03d.jpg"),
+      fps,
+      maxDurationSec: params.cfg.maxDurationSec,
+    });
+
+    const frames = (await readdir(tempDir))
+      .filter((name) => name.startsWith("frame-") && name.endsWith(".jpg"))
+      .sort()
+      .slice(0, params.cfg.maxFrames);
+
     const summaries: string[] = [];
-    if (params.cfg.mode === "light") {
-      const fps = Math.max(0.05, params.cfg.frames / Math.max(params.cfg.maxDurationSec, 1));
-      await runFfmpegExtractFrames({
-        ffmpegPath: params.cfg.ffmpegPath,
-        videoPath: params.videoPath,
-        outputPattern: join(tempDir, "frame-%03d.jpg"),
-        fps,
-        maxDurationSec: params.cfg.maxDurationSec,
+    for (const frame of frames) {
+      const buffer = await readFile(join(tempDir, frame));
+      if (!buffer.length) continue;
+      const summary = await describeImageWithVision({
+        config: visionConfig,
+        buffer,
+        mimeType: "image/jpeg",
       });
-      const frames = (await readdir(tempDir))
-        .filter((name) => name.startsWith("frame-") && name.endsWith(".jpg"))
-        .sort()
-        .slice(0, params.cfg.maxFrames);
-      for (const frame of frames) {
-        const buffer = await readFile(join(tempDir, frame));
-        if (!buffer.length) continue;
-        const summary = await describeImageWithVision({
-          config: visionConfig,
-          buffer,
-          mimeType: "image/jpeg",
-        });
-        if (summary) summaries.push(summary);
-      }
-    } else {
-      const fps = Math.max(0.1, 1 / Math.max(params.cfg.intervalSec, 1));
-      await runFfmpegExtractFrames({
-        ffmpegPath: params.cfg.ffmpegPath,
-        videoPath: params.videoPath,
-        outputPattern: join(tempDir, "frame-%03d.jpg"),
-        fps,
-        maxDurationSec: params.cfg.maxDurationSec,
-      });
-      const frames = (await readdir(tempDir))
-        .filter((name) => name.startsWith("frame-") && name.endsWith(".jpg"))
-        .sort()
-        .slice(0, params.cfg.maxFrames);
-      for (const frame of frames) {
-        const buffer = await readFile(join(tempDir, frame));
-        if (!buffer.length) continue;
-        const summary = await describeImageWithVision({
-          config: visionConfig,
-          buffer,
-          mimeType: "image/jpeg",
-        });
-        if (summary) summaries.push(summary);
-      }
+      if (summary) summaries.push(summary);
     }
 
     if (summaries.length === 0) return null;

@@ -1,13 +1,14 @@
 import type { ClawdbotConfig } from "openclaw/plugin-sdk";
 import { createWriteStream } from "node:fs";
-import { appendFile, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, join } from "node:path";
 import archiver from "archiver";
 
 import { getWecomRuntime } from "./runtime.js";
 import { listWecomAccountIds } from "./accounts.js";
 import { sendWecomFile, sendWecomText, uploadWecomMedia } from "./wecom-api.js";
+import { sleep, appendOperationLog, resolveSendIntervalMs } from "./shared/index.js";
 import type { ResolvedWecomAccount } from "./types.js";
 
 export type CommandContext = {
@@ -38,26 +39,6 @@ function parseQuotedArgs(raw: string): string[] {
   return args;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function resolveSendIntervalMs(ctx: CommandContext): number {
-  const interval = ctx.account.config.sendQueue?.intervalMs;
-  return typeof interval === "number" && interval >= 0 ? interval : 400;
-}
-
-async function appendOperationLog(ctx: CommandContext, entry: Record<string, unknown>): Promise<void> {
-  const logPath = ctx.account.config.operations?.logPath?.trim();
-  if (!logPath) return;
-  try {
-    await mkdir(dirname(logPath), { recursive: true });
-    await appendFile(logPath, `${JSON.stringify({ ts: new Date().toISOString(), ...entry })}\n`);
-  } catch {
-    // ignore
-  }
-}
-
 async function zipDirectory(sourceDir: string): Promise<{ zipPath: string; cleanup: () => Promise<void> }> {
   const tempDir = await mkdtemp(join(tmpdir(), "openclaw-wecom-zip-"));
   const zipPath = join(tempDir, `${basename(sourceDir)}.zip`);
@@ -82,7 +63,8 @@ async function sendFiles(ctx: CommandContext, paths: string[]): Promise<{ sent: 
   let sent = 0;
   let skipped = 0;
   const maxBytes = ctx.account.config.media?.maxBytes;
-  const intervalMs = resolveSendIntervalMs(ctx);
+  const intervalMs = resolveSendIntervalMs(ctx.account.config);
+  const logPath = ctx.account.config.operations?.logPath;
   for (const rawPath of paths) {
     const path = rawPath.startsWith("file://") ? rawPath.replace(/^file:\/\//, "") : rawPath;
     if (!path.startsWith("/")) {
@@ -127,7 +109,7 @@ async function sendFiles(ctx: CommandContext, paths: string[]): Promise<{ sent: 
         mediaId,
       });
       sent += 1;
-      await appendOperationLog(ctx, {
+      await appendOperationLog(logPath, {
         action: "sendfile",
         accountId: ctx.account.accountId,
         toUser: ctx.fromUser,
@@ -143,7 +125,7 @@ async function sendFiles(ctx: CommandContext, paths: string[]): Promise<{ sent: 
     } catch (err) {
       skipped += 1;
       await sendAndRecord(ctx, `⚠️ 发送失败：${path} (${String(err)})`);
-      await appendOperationLog(ctx, {
+      await appendOperationLog(logPath, {
         action: "sendfile",
         accountId: ctx.account.accountId,
         toUser: ctx.fromUser,
