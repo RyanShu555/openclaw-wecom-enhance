@@ -10,3 +10,6 @@ npm-debug.log*
 # OS
 .DS_Store
 docs/TECHNICAL.md
+
+# Local AI assistant settings (do not commit)
+.claude/
