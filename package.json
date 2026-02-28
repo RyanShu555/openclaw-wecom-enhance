@@ -62,5 +62,10 @@
     "README.md",
     "README.zh.md",
     "README.en.md"
+  ],
+  "bundleDependencies": [
+    "archiver",
+    "fast-xml-parser",
+    "zod"
   ]
 }

@@ -94,10 +94,22 @@ export type WecomAccountConfig = {
     timeoutMs?: number;
     retries?: number;
     retryDelayMs?: number;
+    egressProxyUrl?: string;
   };
 
   // If true (default), bot mode can bridge media via app send APIs.
   botMediaBridge?: boolean;
+
+  // 消息防抖（毫秒），默认 500ms
+  debounceMs?: number;
+
+  // 动态 Agent 路由
+  dynamicAgents?: {
+    enabled?: boolean;
+    dmCreateAgent?: boolean;
+    groupEnabled?: boolean;
+    adminUsers?: string[];
+  };
 
   // Send queue behavior (e.g., /sendfile)
   sendQueue?: {

@@ -42,24 +42,35 @@ import {
 import { dispatchOutboundMedia } from "./shared/dispatch-media.js";
 import { buildAgentContext } from "./shared/agent-context.js";
 import { processInboundMedia } from "./shared/media-inbound.js";
+import { ConversationQueue, type PendingBatch, DEFAULT_DEBOUNCE_MS } from "./shared/conversation-queue.js";
+import { sendWecomText } from "./wecom-api.js";
 
 const STREAM_TTL_MS = 10 * 60 * 1000;
 const STREAM_MAX_BYTES = 20_480;
 const STREAM_MAX_ENTRIES = 500;
 const DEDUPE_TTL_MS = 2 * 60 * 1000;
 const DEDUPE_MAX_ENTRIES = 2_000;
+const BOT_WINDOW_MS = 6 * 60 * 1000;
+const BOT_SWITCH_MARGIN_MS = 30 * 1000;
 const mediaCache = new Map<string, MediaCacheEntry>();
 
 type StreamState = {
   streamId: string;
   msgid?: string;
   responseUrl?: string;
+  conversationKey?: string;
+  userId?: string;
+  chatType?: "group" | "direct";
+  chatId?: string;
   createdAt: number;
   updatedAt: number;
   started: boolean;
   finished: boolean;
   error?: string;
   content: string;
+  // 超时降级相关
+  fallbackMode?: "media" | "timeout" | "error";
+  dmContent?: string;
 };
 
 type InboundMedia = {
@@ -77,6 +88,91 @@ type InboundBody = {
 const streams = new Map<string, StreamState>();
 const msgidToStreamId = new Map<string, string>();
 const recentEncrypts = new Map<string, { ts: number; streamId?: string }>();
+
+// ── 会话级防抖队列 ──
+type BotBatchMeta = {
+  target: WecomWebhookTarget;
+  msg: WecomInboundMessage;
+  streamId: string;
+  nonce: string;
+  timestamp: string;
+};
+const botQueue = new ConversationQueue<BotBatchMeta>();
+botQueue.setFlushHandler((batch) => void flushBotBatch(batch));
+
+async function flushBotBatch(batch: PendingBatch<BotBatchMeta>): Promise<void> {
+  const { meta } = batch;
+  const { target, streamId } = meta;
+  // 聚合多条消息为一条
+  const mergedText = batch.contents.join("\n");
+  const mergedMsg: WecomInboundMessage = {
+    ...meta.msg,
+    msgtype: "text",
+    text: { content: mergedText },
+  };
+  try {
+    let core: PluginRuntime | null = null;
+    try { core = getWecomRuntime(); } catch { /* runtime not ready */ }
+    if (core) {
+      streams.get(streamId)!.started = true;
+      const enrichedTarget: WecomWebhookTarget = { ...target, core };
+      await startAgentForStream({ target: enrichedTarget, accountId: target.account.accountId, msg: mergedMsg, streamId });
+    } else {
+      const state = streams.get(streamId);
+      if (state) { state.finished = true; state.updatedAt = Date.now(); }
+    }
+  } catch (err) {
+    const state = streams.get(streamId);
+    if (state) {
+      state.error = err instanceof Error ? err.message : String(err);
+      state.content = state.content || `Error: ${state.error}`;
+      state.finished = true;
+      state.updatedAt = Date.now();
+    }
+    target.runtime.error?.(`[${target.account.accountId}] wecom agent failed: ${String(err)}`);
+  } finally {
+    botQueue.onBatchFinished(batch.conversationKey);
+  }
+}
+
+// ── 超时降级辅助 ──
+function shouldFallbackToDm(state: StreamState): boolean {
+  if (state.fallbackMode) return false; // 已经在降级中
+  return Date.now() - state.createdAt >= BOT_WINDOW_MS - BOT_SWITCH_MARGIN_MS;
+}
+
+function appendDmContent(state: StreamState, text: string): void {
+  const next = state.dmContent ? `${state.dmContent}\n\n${text}`.trim() : text.trim();
+  state.dmContent = truncateUtf8Bytes(next, 200_000);
+}
+
+async function sendAgentDmText(params: {
+  account: ResolvedWecomAccount;
+  userId: string;
+  text: string;
+}): Promise<void> {
+  await sendWecomText({ account: params.account, toUser: params.userId, text: params.text });
+}
+
+function buildFallbackPrompt(params: {
+  kind: "media" | "timeout" | "error";
+  agentConfigured: boolean;
+  userId?: string;
+}): string {
+  if (!params.agentConfigured) {
+    return "需要通过应用私信发送，但管理员尚未配置企业微信自建应用（Agent）通道。请联系管理员配置后再试。";
+  }
+  if (!params.userId) {
+    return "需要通过应用私信兜底发送，但未能识别触发者 userid。请联系管理员排查配置。";
+  }
+  if (params.kind === "timeout") {
+    return "内容较长，为避免超时，后续内容将通过应用私信发送给你。";
+  }
+  if (params.kind === "media") {
+    return "已生成文件，将通过应用私信发送给你。";
+  }
+  return "交付出现异常，已尝试通过应用私信发送给你。";
+}
 
 import { getCachedMedia as getCachedMediaShared, storeCachedMedia as storeCachedMediaShared } from "./shared/cache-utils.js";
 
@@ -124,6 +220,8 @@ function pruneStreams(): void {
       recentEncrypts.delete(sorted[i]![0]);
     }
   }
+
+  botQueue.prune(STREAM_TTL_MS);
 }
 
 
@@ -263,7 +361,47 @@ async function startAgentForStream(params: {
         const canBridgeMedia = account.config.botMediaBridge !== false
           && Boolean(account.corpId && account.corpSecret && account.agentId);
         const toChatId = chatType === "group" ? chatId : undefined;
+        const current = streams.get(streamId);
+        if (!current) return;
 
+        // ── 超时降级检测 ──
+        const agentConfigured = Boolean(account.corpId && account.corpSecret && account.agentId);
+        if (!current.fallbackMode && shouldFallbackToDm(current) && agentConfigured && userid !== "unknown") {
+          current.fallbackMode = "timeout";
+          const prompt = buildFallbackPrompt({ kind: "timeout", agentConfigured, userId: userid });
+          // 把当前已有内容存入 dmContent
+          if (current.content.trim()) appendDmContent(current, current.content);
+          // 在流中发送降级提示
+          current.content = truncateUtf8Bytes(
+            current.content ? `${current.content}\n\n${prompt}` : prompt,
+            STREAM_MAX_BYTES,
+          );
+          current.updatedAt = Date.now();
+        }
+
+        // 如果已进入降级模式，后续内容走 Agent DM
+        if (current.fallbackMode && agentConfigured && userid !== "unknown") {
+          const text = payload.text ?? "";
+          if (text.trim()) appendDmContent(current, text.trim());
+          // 媒体也走 DM
+          if (canBridgeMedia) {
+            try {
+              const result = await dispatchOutboundMedia({
+                payload, account, toUser: userid, chatId: toChatId,
+                maxBytes: resolveMediaMaxBytes(target),
+              });
+              if (result.sent) {
+                appendDmContent(current, result.label ?? "[已发送媒体]");
+                target.statusSink?.({ lastOutboundAt: Date.now() });
+              }
+            } catch (err) {
+              target.runtime.error?.(`[${account.accountId}] wecom bot media bridge failed: ${String(err)}`);
+            }
+          }
+          return;
+        }
+
+        // ── 正常流式路径 ──
         if (canBridgeMedia) {
           try {
             const result = await dispatchOutboundMedia({
@@ -350,6 +488,19 @@ async function startAgentForStream(params: {
   if (current) {
     current.finished = true;
     current.updatedAt = Date.now();
+
+    // 如果有降级内容，通过 Agent DM 发送
+    if (current.fallbackMode && current.dmContent?.trim() && userid !== "unknown") {
+      const agentConfigured = Boolean(account.corpId && account.corpSecret && account.agentId);
+      if (agentConfigured) {
+        try {
+          await sendAgentDmText({ account, userId: userid, text: current.dmContent.trim() });
+          target.statusSink?.({ lastOutboundAt: Date.now() });
+        } catch (err) {
+          target.runtime.error?.(`[${account.accountId}] wecom bot DM fallback failed: ${String(err)}`);
+        }
+      }
+    }
   }
 }
 
@@ -939,10 +1090,20 @@ export async function handleWecomBotWebhook(params: {
 
   const streamId = createStreamId();
   if (msgid) msgidToStreamId.set(msgid, streamId);
+
+  const userid = msg.from?.userid?.trim() || "unknown";
+  const chatType = msg.chattype === "group" ? "group" : "direct";
+  const convChatId = msg.chattype === "group" ? (msg.chatid?.trim() || "unknown") : userid;
+  const conversationKey = `${target.account.accountId}:${convChatId}`;
+
   streams.set(streamId, {
     streamId,
     msgid,
     responseUrl: typeof (msg as any).response_url === "string" ? String((msg as any).response_url).trim() : undefined,
+    conversationKey,
+    userId: userid,
+    chatType,
+    chatId: convChatId,
     createdAt: Date.now(),
     updatedAt: Date.now(),
     started: false,
@@ -951,31 +1112,47 @@ export async function handleWecomBotWebhook(params: {
   });
   recentEncrypts.set(encryptHash, { ts: Date.now(), streamId });
 
-  let core: PluginRuntime | null = null;
-  try {
-    core = getWecomRuntime();
-  } catch (err) {
-    logVerbose(target, `runtime not ready, skipping agent processing: ${String(err)}`);
-  }
+  // 解析消息文本用于防抖聚合
+  const inboundText = msgtype === "text"
+    ? String((msg as any).text?.content ?? "")
+    : `[${msgtype}]`;
 
-  if (core) {
-    streams.get(streamId)!.started = true;
-    const enrichedTarget: WecomWebhookTarget = { ...target, core };
-    startAgentForStream({ target: enrichedTarget, accountId: target.account.accountId, msg, streamId }).catch((err) => {
-      const state = streams.get(streamId);
-      if (state) {
-        state.error = err instanceof Error ? err.message : String(err);
-        state.content = state.content || `Error: ${state.error}`;
-        state.finished = true;
-        state.updatedAt = Date.now();
+  const debounceMs = typeof target.account.config.debounceMs === "number"
+    ? target.account.config.debounceMs : DEFAULT_DEBOUNCE_MS;
+
+  // 将消息加入防抖队列
+  const { status } = botQueue.add({
+    conversationKey,
+    content: inboundText,
+    meta: { target, msg, streamId, nonce, timestamp },
+  });
+
+  logVerbose(target, `bot queue status=${status} conversationKey=${conversationKey}`);
+
+  // 非文本消息或首条消息直接处理（不防抖）
+  if (msgtype !== "text" || status === "active_new") {
+    // active_new 的消息会在防抖超时后自动 flush
+    // 非文本消息需要立即处理（媒体不适合聚合）
+    if (msgtype !== "text") {
+      let core: PluginRuntime | null = null;
+      try { core = getWecomRuntime(); } catch { /* runtime not ready */ }
+      if (core) {
+        streams.get(streamId)!.started = true;
+        const enrichedTarget: WecomWebhookTarget = { ...target, core };
+        startAgentForStream({ target: enrichedTarget, accountId: target.account.accountId, msg, streamId }).catch((err) => {
+          const state = streams.get(streamId);
+          if (state) {
+            state.error = err instanceof Error ? err.message : String(err);
+            state.content = state.content || `Error: ${state.error}`;
+            state.finished = true;
+            state.updatedAt = Date.now();
+          }
+          target.runtime.error?.(`[${target.account.accountId}] wecom agent failed: ${String(err)}`);
+        });
+      } else {
+        const state = streams.get(streamId);
+        if (state) { state.finished = true; state.updatedAt = Date.now(); }
       }
-      target.runtime.error?.(`[${target.account.accountId}] wecom agent failed: ${String(err)}`);
-    });
-  } else {
-    const state = streams.get(streamId);
-    if (state) {
-      state.finished = true;
-      state.updatedAt = Date.now();
     }
   }
 

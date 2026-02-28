@@ -1,5 +1,6 @@
 import type { WecomWebhookTarget } from "../monitor.js";
 import { getWecomRuntime } from "../runtime.js";
+import { shouldUseDynamicAgent, generateAgentId, ensureDynamicAgentListed } from "../dynamic-agent.js";
 
 export type AgentContextParams = {
   target: WecomWebhookTarget;
@@ -45,6 +46,20 @@ export function buildAgentContext(params: AgentContextParams): AgentContextResul
     accountId: account.accountId,
     peer: { kind: isGroup ? "group" : "dm", id: peerId },
   });
+
+  // 动态 Agent 路由覆盖
+  const dynamicCfg = account.config.dynamicAgents;
+  if (shouldUseDynamicAgent({ config: dynamicCfg, userId: fromUser, isGroup })) {
+    const dynamicId = generateAgentId({ userId: fromUser, chatId, isGroup });
+    route.agentId = dynamicId;
+    route.sessionKey = `${dynamicId}:${peerId}`;
+    // 异步注册，不阻塞消息处理
+    ensureDynamicAgentListed({
+      core,
+      agentId: dynamicId,
+      label: isGroup ? `WeCom 群聊 ${chatId}` : `WeCom 用户 ${fromUser}`,
+    }).catch(() => {});
+  }
 
   const storePath = core.channel.session.resolveStorePath(config.session?.store, {
     agentId: route.agentId,

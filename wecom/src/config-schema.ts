@@ -94,9 +94,19 @@ const accountSchema = z.object({
     timeoutMs: z.number().optional(),
     retries: z.number().optional(),
     retryDelayMs: z.number().optional(),
+    egressProxyUrl: z.string().optional(),
   }).optional(),
 
   botMediaBridge: z.boolean().optional(),
+
+  debounceMs: z.number().optional(),
+
+  dynamicAgents: z.object({
+    enabled: z.boolean().optional(),
+    dmCreateAgent: z.boolean().optional(),
+    groupEnabled: z.boolean().optional(),
+    adminUsers: z.array(z.string()).optional(),
+  }).optional(),
 
   sendQueue: z.object({
     intervalMs: z.number().optional(),
@@ -177,9 +187,19 @@ export const WecomConfigSchema = ensureJsonSchema(z.object({
     timeoutMs: z.number().optional(),
     retries: z.number().optional(),
     retryDelayMs: z.number().optional(),
+    egressProxyUrl: z.string().optional(),
   }).optional(),
 
   botMediaBridge: z.boolean().optional(),
+
+  debounceMs: z.number().optional(),
+
+  dynamicAgents: z.object({
+    enabled: z.boolean().optional(),
+    dmCreateAgent: z.boolean().optional(),
+    groupEnabled: z.boolean().optional(),
+    adminUsers: z.array(z.string()).optional(),
+  }).optional(),
 
   sendQueue: z.object({
     intervalMs: z.number().optional(),

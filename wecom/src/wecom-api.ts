@@ -3,6 +3,35 @@ import type { ResolvedWecomAccount } from "./types.js";
 import { sleep } from "./shared/string-utils.js";
 import { MEDIA_TOO_LARGE_ERROR } from "./shared/media-shared.js";
 
+// ── 出站代理支持 ──
+let cachedProxyModule: typeof import("undici") | null | false = null;
+const proxyDispatchers = new Map<string, any>();
+
+async function getProxyDispatcher(proxyUrl: string): Promise<any | undefined> {
+  if (!proxyUrl) return undefined;
+  const cached = proxyDispatchers.get(proxyUrl);
+  if (cached) return cached;
+
+  // 动态加载 undici（可选依赖）
+  if (cachedProxyModule === false) return undefined;
+  if (cachedProxyModule === null) {
+    try {
+      cachedProxyModule = await import("undici");
+    } catch {
+      cachedProxyModule = false;
+      return undefined;
+    }
+  }
+  const { ProxyAgent } = cachedProxyModule;
+  const dispatcher = new ProxyAgent(proxyUrl);
+  proxyDispatchers.set(proxyUrl, dispatcher);
+  return dispatcher;
+}
+
+function resolveEgressProxyUrl(account: ResolvedWecomAccount): string {
+  return account.config.network?.egressProxyUrl?.trim() || "";
+}
+
 export type WecomTokenState = {
   token: string | null;
   expiresAt: number;
@@ -84,13 +113,17 @@ function resolveNetworkConfig(account: ResolvedWecomAccount): { timeoutMs: numbe
 
 async function fetchWithRetry(account: ResolvedWecomAccount, input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const { timeoutMs, retries, retryDelayMs } = resolveNetworkConfig(account);
+  const proxyUrl = resolveEgressProxyUrl(account);
+  const dispatcher = proxyUrl ? await getProxyDispatcher(proxyUrl) : undefined;
   let attempt = 0;
   let lastErr: unknown;
   while (attempt <= retries) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const res = await apiLimiter.execute(() => fetch(input, { ...init, signal: controller.signal }));
+      const fetchInit = { ...init, signal: controller.signal } as any;
+      if (dispatcher) fetchInit.dispatcher = dispatcher;
+      const res = await apiLimiter.execute(() => fetch(input, fetchInit));
       clearTimeout(timer);
       return res;
     } catch (err) {
