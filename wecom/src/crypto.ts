@@ -66,7 +66,10 @@ export function verifyWecomSignature(params: {
     nonce: params.nonce,
     encrypt: params.encrypt,
   });
-  return expected === params.signature;
+  const a = Buffer.from(expected, "utf8");
+  const b = Buffer.from(params.signature, "utf8");
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }
 
 export function decryptWecomEncrypted(params: {

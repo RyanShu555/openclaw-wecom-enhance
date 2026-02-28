@@ -5,6 +5,9 @@ import type { ClawdbotConfig, PluginRuntime } from "openclaw/plugin-sdk";
 import type { ResolvedWecomAccount } from "./types.js";
 import { handleWecomAppWebhook, handleWecomPushRequest } from "./wecom-app.js";
 import { handleWecomBotWebhook } from "./wecom-bot.js";
+import { readRequestBody } from "./shared/http-utils.js";
+
+const MAX_WEBHOOK_BODY_SIZE = 1024 * 1024;
 
 export type WecomRuntimeEnv = {
   log?: (message: string) => void;
@@ -66,10 +69,23 @@ export async function handleWecomWebhookRequest(
 
   // Prefer account-level mode. If both, we attempt bot first (JSON) then app (XML).
   // Concrete routing is implemented in handlers.
-  const botHandled = await handleWecomBotWebhook({ req, res, targets });
+  // Buffer the body once so both handlers can use it without re-reading the stream.
+  let rawBody: string | undefined;
+  if (req.method === "POST") {
+    try {
+      rawBody = await readRequestBody(req, MAX_WEBHOOK_BODY_SIZE);
+    } catch (err) {
+      res.statusCode = 413;
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.end(err instanceof Error ? err.message : "payload too large");
+      return true;
+    }
+  }
+
+  const botHandled = await handleWecomBotWebhook({ req, res, targets, rawBody });
   if (botHandled) return true;
 
-  const appHandled = await handleWecomAppWebhook({ req, res, targets });
+  const appHandled = await handleWecomAppWebhook({ req, res, targets, rawBody });
   if (appHandled) return true;
 
   // Fallback: not a recognized request for this plugin.

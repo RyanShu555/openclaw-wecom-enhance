@@ -65,19 +65,30 @@ export async function readRequestBody(req: IncomingMessage, maxSize: number): Pr
   return await new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let totalSize = 0;
+    let done = false;
 
     req.on("data", (c) => {
+      if (done) return;
       const chunk = Buffer.isBuffer(c) ? c : Buffer.from(c);
       totalSize += chunk.length;
       if (totalSize > maxSize) {
+        done = true;
         reject(new Error(`Request body too large (limit: ${maxSize} bytes)`));
         req.destroy();
         return;
       }
       chunks.push(chunk);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-    req.on("error", reject);
+    req.on("end", () => {
+      if (done) return;
+      done = true;
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+    req.on("error", (err) => {
+      if (done) return;
+      done = true;
+      reject(err);
+    });
   });
 }
 
@@ -87,10 +98,13 @@ export async function readRequestBody(req: IncomingMessage, maxSize: number): Pr
 export async function readJsonBody(req: IncomingMessage, maxBytes: number): Promise<{ ok: boolean; value?: unknown; error?: string }> {
   const chunks: Buffer[] = [];
   let total = 0;
+  let done = false;
   return await new Promise((resolve) => {
     req.on("data", (chunk: Buffer) => {
+      if (done) return;
       total += chunk.length;
       if (total > maxBytes) {
+        done = true;
         resolve({ ok: false, error: "payload too large" });
         req.destroy();
         return;
@@ -98,6 +112,8 @@ export async function readJsonBody(req: IncomingMessage, maxBytes: number): Prom
       chunks.push(chunk);
     });
     req.on("end", () => {
+      if (done) return;
+      done = true;
       try {
         const raw = Buffer.concat(chunks).toString("utf8");
         if (!raw.trim()) {
@@ -110,6 +126,8 @@ export async function readJsonBody(req: IncomingMessage, maxBytes: number): Prom
       }
     });
     req.on("error", (err) => {
+      if (done) return;
+      done = true;
       resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
     });
   });

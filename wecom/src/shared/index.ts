@@ -4,3 +4,6 @@ export * from "./string-utils.js";
 export * from "./media-shared.js";
 export * from "./cache-utils.js";
 export * from "./log-utils.js";
+export * from "./dispatch-media.js";
+export * from "./agent-context.js";
+export * from "./media-inbound.js";

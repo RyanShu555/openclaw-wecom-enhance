@@ -1,40 +1,21 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { XMLParser } from "fast-xml-parser";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 
 import type { WecomWebhookTarget } from "./monitor.js";
 import { decryptWecomEncrypted, verifyWecomSignature } from "./crypto.js";
-import { getWecomRuntime } from "./runtime.js";
 import { handleCommand } from "./commands.js";
 import { markdownToWecomText } from "./format.js";
 import {
-  extractFileTextPreview,
-  resolveAutoAudioConfig,
-  resolveAutoFileConfig,
-  resolveAutoVideoConfig,
-  summarizeVideoWithVision,
-  transcribeAudioWithOpenAI,
-} from "./media-auto.js";
-import { describeImageWithVision, resolveVisionConfig } from "./media-vision.js";
-import {
-  downloadWecomMedia,
-  fetchMediaFromUrl,
-  sendWecomFile,
-  sendWecomImage,
   sendWecomText,
-  sendWecomVideo,
-  sendWecomVoice,
   uploadWecomMedia,
+  sendWecomFile,
 } from "./wecom-api.js";
 import {
-  cleanupMediaDir,
-  resolveExtFromContentType,
   resolveMediaMaxBytes,
-  resolveMediaRetentionMs,
   resolveMediaTempDir,
-  sanitizeFilename,
 } from "./media-utils.js";
 import {
   readRequestBody,
@@ -51,18 +32,14 @@ import {
   resolveSendIntervalMs,
 } from "./shared/log-utils.js";
 import {
-  isMediaTooLargeError,
-  loadOutboundMedia,
-  type MediaType,
-} from "./shared/media-shared.js";
-import {
-  buildMediaCacheKey,
   getCachedMedia,
   MEDIA_CACHE_MAX_ENTRIES,
   type MediaCacheEntry,
-  pruneMediaCache,
   storeCachedMedia,
 } from "./shared/cache-utils.js";
+import { dispatchOutboundMedia } from "./shared/dispatch-media.js";
+import { buildAgentContext } from "./shared/agent-context.js";
+import { processInboundMedia } from "./shared/media-inbound.js";
 
 const xmlParser = new XMLParser({
   ignoreAttributes: false,
@@ -574,64 +551,16 @@ async function startAgentForApp(params: {
   } | null;
 }): Promise<void> {
   const { target, fromUser, chatId, isGroup, messageText, media } = params;
-  const core = getWecomRuntime();
-  const config = target.config;
   const account = target.account;
 
-  const peerId = isGroup ? (chatId || "unknown") : fromUser;
-  const route = core.channel.routing.resolveAgentRoute({
-    cfg: config,
-    channel: "wecom",
-    accountId: account.accountId,
-    peer: { kind: isGroup ? "group" : "dm", id: peerId },
+  const { core, route, storePath, ctxPayload, tableMode } = buildAgentContext({
+    target,
+    fromUser,
+    chatId,
+    isGroup,
+    messageText,
+    media,
   });
-
-  const fromLabel = isGroup ? `group:${peerId}` : `user:${fromUser}`;
-  const storePath = core.channel.session.resolveStorePath(config.session?.store, {
-    agentId: route.agentId,
-  });
-  const envelopeOptions = core.channel.reply.resolveEnvelopeFormatOptions(config);
-  const previousTimestamp = core.channel.session.readSessionUpdatedAt({
-    storePath,
-    sessionKey: route.sessionKey,
-  });
-  const body = core.channel.reply.formatAgentEnvelope({
-    channel: "WeCom",
-    from: fromLabel,
-    previousTimestamp,
-    envelope: envelopeOptions,
-    body: messageText,
-  });
-
-  const ctxPayload = core.channel.reply.finalizeInboundContext({
-    Body: body,
-    RawBody: messageText,
-    CommandBody: messageText,
-    From: isGroup ? `wecom:group:${peerId}` : `wecom:${fromUser}`,
-    To: `wecom:${peerId}`,
-    SessionKey: route.sessionKey,
-    AccountId: route.accountId,
-    ChatType: isGroup ? "group" : "direct",
-    ConversationLabel: fromLabel,
-    SenderName: fromUser,
-    SenderId: fromUser,
-    Provider: "wecom",
-    Surface: "wecom",
-    MessageSid: `wecom-${Date.now()}`,
-    OriginatingChannel: "wecom",
-    OriginatingTo: `wecom:${peerId}`,
-  });
-
-  if (media?.path) {
-    ctxPayload.MediaPath = media.path;
-    ctxPayload.MediaType = media.type;
-    if (media.mimeType) {
-      (ctxPayload as any).MediaMimeType = media.mimeType;
-    }
-    if (media.url) {
-      ctxPayload.MediaUrl = media.url;
-    }
-  }
 
   await core.channel.session.recordInboundSession({
     storePath,
@@ -648,42 +577,21 @@ async function startAgentForApp(params: {
     direction: "inbound",
   });
 
-  const tableMode = core.channel.text.resolveMarkdownTableMode({
-    cfg: config,
-    channel: "wecom",
-    accountId: account.accountId,
-  });
-
   await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,
-    cfg: config,
+    cfg: target.config,
     dispatcherOptions: {
       deliver: async (payload, info) => {
-        const maxBytes = resolveMediaMaxBytes(target);
         try {
-          const outbound = await loadOutboundMedia({ payload, account, maxBytes });
-          if (outbound) {
-            const mediaId = await uploadWecomMedia({
-              account,
-              type: outbound.type,
-              buffer: outbound.buffer,
-              filename: outbound.filename,
-            });
-            if (outbound.type === "image") {
-              await sendWecomImage({ account, toUser: fromUser, chatId: isGroup ? chatId : undefined, mediaId });
-              logVerbose(target, `app image reply delivered (${info.kind}) to ${fromUser}`);
-            } else if (outbound.type === "voice") {
-              await sendWecomVoice({ account, toUser: fromUser, chatId: isGroup ? chatId : undefined, mediaId });
-              logVerbose(target, `app voice reply delivered (${info.kind}) to ${fromUser}`);
-            } else if (outbound.type === "video") {
-              const title = (payload as any).title as string | undefined;
-              const description = (payload as any).description as string | undefined;
-              await sendWecomVideo({ account, toUser: fromUser, chatId: isGroup ? chatId : undefined, mediaId, title, description });
-              logVerbose(target, `app video reply delivered (${info.kind}) to ${fromUser}`);
-            } else if (outbound.type === "file") {
-              await sendWecomFile({ account, toUser: fromUser, chatId: isGroup ? chatId : undefined, mediaId });
-              logVerbose(target, `app file reply delivered (${info.kind}) to ${fromUser}`);
-            }
+          const result = await dispatchOutboundMedia({
+            payload,
+            account,
+            toUser: fromUser,
+            chatId: isGroup ? chatId : undefined,
+            maxBytes: resolveMediaMaxBytes(target),
+          });
+          if (result.sent) {
+            logVerbose(target, `app ${result.type} reply delivered (${info.kind}) to ${fromUser}`);
             target.statusSink?.({ lastOutboundAt: Date.now() });
           }
         } catch (err) {
@@ -727,7 +635,6 @@ async function processAppMessage(params: {
   if (!fromUser) return;
 
   let messageText = "";
-  const retentionMs = resolveMediaRetentionMs(target);
   let mediaContext: { type: "image" | "voice" | "video" | "file"; path: string; mimeType?: string; url?: string } | null = null;
 
   if (msgType === "text") {
@@ -741,54 +648,12 @@ async function processAppMessage(params: {
     } else {
       const mediaId = String(msgObj?.MediaId ?? "");
       if (mediaId) {
-        try {
-          const cacheKey = buildMediaCacheKey({ mediaId });
-          const cached = await getLocalCachedMedia(cacheKey, retentionMs);
-          if (cached) {
-            mediaContext = { type: cached.type, path: cached.path, mimeType: cached.mimeType, url: cached.url };
-            logVerbose(target, `app voice cache hit: ${cached.path}`);
-            messageText = "[用户发送了一条语音消息]\n\n请根据语音内容回复用户。";
-          } else {
-            const maxBytes = resolveMediaMaxBytes(target);
-            const media = await downloadWecomMedia({ account: target.account, mediaId, maxBytes });
-            if (maxBytes && media.buffer.length > maxBytes) {
-              messageText = "[语音消息过大，未处理]\n\n请发送更短的语音消息。";
-            } else {
-              const ext = resolveExtFromContentType(media.contentType, "amr");
-              const tempDir = resolveMediaTempDir(target);
-              await mkdir(tempDir, { recursive: true });
-              await cleanupMediaDir(
-                tempDir,
-                target.account.config.media?.retentionHours,
-                target.account.config.media?.cleanupOnStart,
-              );
-              const tempVoicePath = join(tempDir, `voice-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`);
-              await writeFile(tempVoicePath, media.buffer);
-              const mimeType = media.contentType || "audio/amr";
-              mediaContext = { type: "voice", path: tempVoicePath, mimeType };
-              storeLocalCachedMedia(cacheKey, {
-                path: tempVoicePath,
-                type: "voice",
-                mimeType,
-                createdAt: Date.now(),
-                size: media.buffer.length,
-              });
-              logVerbose(target, `app voice saved (${media.buffer.length} bytes): ${tempVoicePath}`);
-              const audioCfg = resolveAutoAudioConfig(target.account.config);
-              const transcript = audioCfg
-                ? await transcribeAudioWithOpenAI({ cfg: audioCfg, buffer: media.buffer, mimeType })
-                : null;
-              messageText = transcript
-                ? `[语音消息转写] ${transcript}`
-                : "[用户发送了一条语音消息]\n\n请根据语音内容回复用户。";
-            }
-          }
-        } catch (err) {
-          target.runtime.error?.(`wecom app voice download failed: ${String(err)}`);
-          messageText = isMediaTooLargeError(err)
-            ? "[语音消息过大，未处理]\n\n请发送更短的语音消息。"
-            : "[用户发送了一条语音消息，但下载失败]\n\n请告诉用户语音处理暂时不可用。";
-        }
+        const result = await processInboundMedia({
+          target, msgtype: "voice", mediaId,
+          getCache: getLocalCachedMedia, storeCache: storeLocalCachedMedia,
+        });
+        messageText = result.text;
+        if (result.media) mediaContext = { type: "voice", path: result.media.path, mimeType: result.media.mimeType, url: result.media.url };
       } else {
         messageText = "[用户发送了一条语音消息]\n\n请告诉用户语音处理暂时不可用。";
       }
@@ -798,88 +663,12 @@ async function processAppMessage(params: {
   if (msgType === "image") {
     const mediaId = String(msgObj?.MediaId ?? "");
     const picUrl = String(msgObj?.PicUrl ?? "");
-    const maxBytes = resolveMediaMaxBytes(target);
-    try {
-      const cacheKey = buildMediaCacheKey({ mediaId, url: picUrl });
-      const cached = await getLocalCachedMedia(cacheKey, retentionMs);
-      if (cached) {
-        mediaContext = { type: cached.type, path: cached.path, mimeType: cached.mimeType, url: cached.url };
-        logVerbose(target, `app image cache hit: ${cached.path}`);
-        if (cached.summary) {
-          messageText = `[用户发送了一张图片]\n\n[图片识别结果]\n${cached.summary}\n\n请根据识别结果回复用户（无需使用 Read 工具读取图片文件）。`;
-        } else {
-          messageText = "[用户发送了一张图片]\n\n请直接根据图片内容回复用户（图片将作为视觉输入提供；无需使用 Read 工具读取图片文件）。";
-        }
-      } else {
-        let buffer: Buffer | null = null;
-        let contentType = "";
-        if (mediaId) {
-          const media = await downloadWecomMedia({ account: target.account, mediaId, maxBytes });
-          buffer = media.buffer;
-          contentType = media.contentType;
-        } else if (picUrl) {
-          const media = await fetchMediaFromUrl(picUrl, target.account, maxBytes);
-          buffer = media.buffer;
-          contentType = media.contentType;
-        }
-
-        if (buffer) {
-          const maxBytes = resolveMediaMaxBytes(target);
-          if (maxBytes && buffer.length > maxBytes) {
-            messageText = "[图片过大，未处理]\n\n请发送更小的图片。";
-          } else {
-            const ext = resolveExtFromContentType(contentType, "jpg");
-            const tempDir = resolveMediaTempDir(target);
-            await mkdir(tempDir, { recursive: true });
-            await cleanupMediaDir(
-              tempDir,
-              target.account.config.media?.retentionHours,
-              target.account.config.media?.cleanupOnStart,
-            );
-            const tempImagePath = join(tempDir, `image-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`);
-            await writeFile(tempImagePath, buffer);
-            const mimeType = contentType || "image/jpeg";
-            mediaContext = { type: "image", path: tempImagePath, mimeType, url: picUrl || undefined };
-
-            const visionConfig = resolveVisionConfig(target.account.config, target.config);
-            const summary = visionConfig
-              ? await describeImageWithVision({ config: visionConfig, buffer, mimeType })
-              : null;
-
-            storeLocalCachedMedia(cacheKey, {
-              path: tempImagePath,
-              type: "image",
-              mimeType,
-              url: picUrl || undefined,
-              summary: summary ?? undefined,
-              createdAt: Date.now(),
-              size: buffer.length,
-            });
-            if (visionConfig && !summary) {
-              await appendOperationLog(target.account.config.operations?.logPath, {
-                action: "vision-image-failed",
-                accountId: target.account.accountId,
-                path: tempImagePath,
-                size: buffer.length,
-              });
-            }
-            logVerbose(target, `app image saved (${buffer.length} bytes): ${tempImagePath}`);
-            if (summary) {
-              messageText = `[用户发送了一张图片]\n\n[图片识别结果]\n${summary}\n\n请根据识别结果回复用户（无需使用 Read 工具读取图片文件）。`;
-            } else {
-              messageText = "[用户发送了一张图片]\n\n请直接根据图片内容回复用户（图片将作为视觉输入提供；无需使用 Read 工具读取图片文件）。";
-            }
-          }
-        } else {
-          messageText = "[用户发送了一张图片，但下载失败]\n\n请告诉用户图片处理暂时不可用。";
-        }
-      }
-    } catch (err) {
-      target.runtime.error?.(`wecom app image download failed: ${String(err)}`);
-      messageText = isMediaTooLargeError(err)
-        ? "[图片过大，未处理]\n\n请发送更小的图片。"
-        : "[用户发送了一张图片，但下载失败]\n\n请告诉用户图片处理暂时不可用。";
-    }
+    const result = await processInboundMedia({
+      target, msgtype: "image", mediaId: mediaId || undefined, url: picUrl || undefined,
+      getCache: getLocalCachedMedia, storeCache: storeLocalCachedMedia,
+    });
+    messageText = result.text;
+    if (result.media) mediaContext = { type: "image", path: result.media.path, mimeType: result.media.mimeType, url: result.media.url };
   }
 
   if (msgType === "link") {
@@ -892,58 +681,12 @@ async function processAppMessage(params: {
   if (msgType === "video") {
     const mediaId = String(msgObj?.MediaId ?? "");
     if (mediaId) {
-      try {
-        const cacheKey = buildMediaCacheKey({ mediaId });
-        const cached = await getLocalCachedMedia(cacheKey, retentionMs);
-        if (cached) {
-          mediaContext = { type: cached.type, path: cached.path, mimeType: cached.mimeType, url: cached.url };
-          logVerbose(target, `app video cache hit: ${cached.path}`);
-          messageText = "[用户发送了一个视频文件]\n\n请根据视频内容回复用户。";
-        } else {
-          const maxBytes = resolveMediaMaxBytes(target);
-          const media = await downloadWecomMedia({ account: target.account, mediaId, maxBytes });
-          if (maxBytes && media.buffer.length > maxBytes) {
-            messageText = "[视频过大，未处理]\n\n请发送更小的视频。";
-          } else {
-            const ext = resolveExtFromContentType(media.contentType, "mp4");
-            const tempDir = resolveMediaTempDir(target);
-            await mkdir(tempDir, { recursive: true });
-            await cleanupMediaDir(
-              tempDir,
-              target.account.config.media?.retentionHours,
-              target.account.config.media?.cleanupOnStart,
-            );
-            const tempVideoPath = join(tempDir, `video-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`);
-            await writeFile(tempVideoPath, media.buffer);
-            const mimeType = media.contentType || "video/mp4";
-            mediaContext = { type: "video", path: tempVideoPath, mimeType };
-            storeLocalCachedMedia(cacheKey, {
-              path: tempVideoPath,
-              type: "video",
-              mimeType,
-              createdAt: Date.now(),
-              size: media.buffer.length,
-            });
-            logVerbose(target, `app video saved (${media.buffer.length} bytes): ${tempVideoPath}`);
-            const videoCfg = resolveAutoVideoConfig(target.account.config);
-            const summary = videoCfg
-              ? await summarizeVideoWithVision({
-                cfg: videoCfg,
-                account: target.account.config,
-                videoPath: tempVideoPath,
-              })
-              : null;
-            messageText = summary
-              ? `[用户发送了一个视频文件]\n\n[视频画面概述]\n${summary}\n\n请根据视频内容回复用户。`
-              : "[用户发送了一个视频文件]\n\n请根据视频内容回复用户。";
-          }
-        }
-      } catch (err) {
-        target.runtime.error?.(`wecom app video download failed: ${String(err)}`);
-        messageText = isMediaTooLargeError(err)
-          ? "[视频过大，未处理]\n\n请发送更小的视频。"
-          : "[用户发送了一个视频，但下载失败]\n\n请告诉用户视频处理暂时不可用。";
-      }
+      const result = await processInboundMedia({
+        target, msgtype: "video", mediaId,
+        getCache: getLocalCachedMedia, storeCache: storeLocalCachedMedia,
+      });
+      messageText = result.text;
+      if (result.media) mediaContext = { type: "video", path: result.media.path, mimeType: result.media.mimeType, url: result.media.url };
     }
   }
 
@@ -951,62 +694,12 @@ async function processAppMessage(params: {
     const mediaId = String(msgObj?.MediaId ?? "");
     const fileName = String(msgObj?.FileName ?? "");
     if (mediaId) {
-      try {
-        const cacheKey = buildMediaCacheKey({ mediaId });
-        const cached = await getLocalCachedMedia(cacheKey, retentionMs);
-        if (cached) {
-          mediaContext = { type: cached.type, path: cached.path, mimeType: cached.mimeType, url: cached.url };
-          logVerbose(target, `app file cache hit: ${cached.path}`);
-          const cachedName = fileName || basename(cached.path) || "未知文件";
-          const fileCfg = resolveAutoFileConfig(target.account.config);
-          const preview = fileCfg
-            ? await extractFileTextPreview({ path: cached.path, mimeType: cached.mimeType, cfg: fileCfg })
-            : null;
-          messageText = preview
-            ? `[用户发送了一个文件: ${cachedName}，已保存到: ${cached.path}]\n\n[文件内容预览]\n${preview}\n\n如需更多内容请使用 Read 工具。`
-            : `[用户发送了一个文件: ${cachedName}，已保存到: ${cached.path}]\n\n请使用 Read 工具查看这个文件的内容并回复用户。`;
-        } else {
-          const maxBytes = resolveMediaMaxBytes(target);
-          const media = await downloadWecomMedia({ account: target.account, mediaId, maxBytes });
-          if (maxBytes && media.buffer.length > maxBytes) {
-            messageText = "[文件过大，未处理]\n\n请发送更小的文件。";
-          } else {
-            const ext = fileName.includes(".") ? fileName.split(".").pop() : resolveExtFromContentType(media.contentType, "bin");
-            const tempDir = resolveMediaTempDir(target);
-            await mkdir(tempDir, { recursive: true });
-            await cleanupMediaDir(
-              tempDir,
-              target.account.config.media?.retentionHours,
-              target.account.config.media?.cleanupOnStart,
-            );
-            const safeName = sanitizeFilename(fileName, `file-${Date.now()}.${ext}`);
-            const tempFilePath = join(tempDir, safeName);
-            await writeFile(tempFilePath, media.buffer);
-            const mimeType = media.contentType || "application/octet-stream";
-            mediaContext = { type: "file", path: tempFilePath, mimeType };
-            storeLocalCachedMedia(cacheKey, {
-              path: tempFilePath,
-              type: "file",
-              mimeType,
-              createdAt: Date.now(),
-              size: media.buffer.length,
-            });
-            logVerbose(target, `app file saved (${media.buffer.length} bytes): ${tempFilePath}`);
-            const fileCfg = resolveAutoFileConfig(target.account.config);
-            const preview = fileCfg
-              ? await extractFileTextPreview({ path: tempFilePath, mimeType, cfg: fileCfg })
-              : null;
-            messageText = preview
-              ? `[用户发送了一个文件: ${safeName}，已保存到: ${tempFilePath}]\n\n[文件内容预览]\n${preview}\n\n如需更多内容请使用 Read 工具。`
-              : `[用户发送了一个文件: ${safeName}，已保存到: ${tempFilePath}]\n\n请使用 Read 工具查看这个文件的内容并回复用户。`;
-          }
-        }
-      } catch (err) {
-        target.runtime.error?.(`wecom app file download failed: ${String(err)}`);
-        messageText = isMediaTooLargeError(err)
-          ? "[文件过大，未处理]\n\n请发送更小的文件。"
-          : "[用户发送了一个文件，但下载失败]\n\n请告诉用户文件处理暂时不可用。";
-      }
+      const result = await processInboundMedia({
+        target, msgtype: "file", mediaId, filename: fileName || undefined,
+        getCache: getLocalCachedMedia, storeCache: storeLocalCachedMedia,
+      });
+      messageText = result.text;
+      if (result.media) mediaContext = { type: "file", path: result.media.path, mimeType: result.media.mimeType, url: result.media.url };
     }
   }
 
@@ -1128,12 +821,19 @@ export async function handleWecomPushRequest(params: {
   }
 
   const expectedToken = resolvePushToken(target);
+  if (!expectedToken) {
+    target.runtime.error?.("[wecom] push endpoint rejected: pushToken not configured. Set pushToken in account config to enable push.");
+    res.statusCode = 403;
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.end(JSON.stringify({ ok: false, error: "Push token not configured" }));
+    return true;
+  }
   const requestToken = pickString(
     payload?.token,
     url.searchParams.get("token"),
     resolveHeaderToken(req),
   );
-  if (expectedToken && expectedToken !== requestToken) {
+  if (expectedToken !== requestToken) {
     res.statusCode = 403;
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.end(JSON.stringify({ ok: false, error: "Invalid push token" }));
@@ -1167,41 +867,22 @@ export async function handleWecomPushRequest(params: {
       await sleep(message.delayMs);
     }
     try {
-      const outbound = await loadOutboundMedia({
+      const result = await dispatchOutboundMedia({
         payload: message,
         account: target.account,
+        toUser,
+        chatId: chatId || undefined,
         maxBytes: resolveMediaMaxBytes(target),
+        title: message.title,
+        description: message.description,
       });
-      if (outbound) {
-        const mediaId = await uploadWecomMedia({
-          account: target.account,
-          type: outbound.type,
-          buffer: outbound.buffer,
-          filename: outbound.filename,
-        });
-        if (outbound.type === "image") {
-          await sendWecomImage({ account: target.account, toUser, chatId: chatId || undefined, mediaId });
-        } else if (outbound.type === "voice") {
-          await sendWecomVoice({ account: target.account, toUser, chatId: chatId || undefined, mediaId });
-        } else if (outbound.type === "video") {
-          await sendWecomVideo({
-            account: target.account,
-            toUser,
-            chatId: chatId || undefined,
-            mediaId,
-            title: message.title,
-            description: message.description,
-          });
-        } else {
-          await sendWecomFile({ account: target.account, toUser, chatId: chatId || undefined, mediaId });
-        }
+      if (result.sent) {
         await appendOperationLog(target.account.config.operations?.logPath, {
           action: "push-media",
           accountId: target.account.accountId,
           toUser,
           chatId: chatId || undefined,
-          mediaType: outbound.type,
-          filename: outbound.filename,
+          mediaType: result.type,
         });
         sent += 1;
       }
@@ -1238,8 +919,9 @@ export async function handleWecomAppWebhook(params: {
   req: IncomingMessage;
   res: ServerResponse;
   targets: WecomWebhookTarget[];
+  rawBody?: string;
 }): Promise<boolean> {
-  const { req, res, targets } = params;
+  const { req, res, targets, rawBody } = params;
   const query = resolveQueryParams(req);
   const timestamp = query.get("timestamp") ?? "";
   const nonce = query.get("nonce") ?? "";
@@ -1296,12 +978,16 @@ export async function handleWecomAppWebhook(params: {
   }
 
   let rawXml = "";
-  try {
-    rawXml = await readRequestBody(req, MAX_REQUEST_BODY_SIZE);
-  } catch {
-    res.statusCode = 413;
-    res.end("payload too large");
-    return true;
+  if (rawBody != null) {
+    rawXml = rawBody;
+  } else {
+    try {
+      rawXml = await readRequestBody(req, MAX_REQUEST_BODY_SIZE);
+    } catch {
+      res.statusCode = 413;
+      res.end("payload too large");
+      return true;
+    }
   }
 
   if (!rawXml.trim().startsWith("<")) {

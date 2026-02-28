@@ -32,25 +32,24 @@ export function markdownToWecomText(markdown: string): string {
   return text.trim();
 }
 
-function getByteLength(str: string): number {
-  return Buffer.byteLength(str, "utf8");
-}
-
 export function splitWecomText(text: string, byteLimit = WECOM_TEXT_BYTE_LIMIT): string[] {
   if (!text) return [""];
-  if (getByteLength(text) <= byteLimit) return [text];
+  if (Buffer.byteLength(text, "utf8") <= byteLimit) return [text];
 
   const chunks: string[] = [];
   let current = "";
+  let currentBytes = 0;
 
   for (const ch of text) {
-    const next = current + ch;
-    if (getByteLength(next) > byteLimit) {
+    const chBytes = Buffer.byteLength(ch, "utf8");
+    if (currentBytes + chBytes > byteLimit) {
       if (current) chunks.push(current);
       current = ch;
+      currentBytes = chBytes;
       continue;
     }
-    current = next;
+    current += ch;
+    currentBytes += chBytes;
   }
 
   if (current) chunks.push(current);

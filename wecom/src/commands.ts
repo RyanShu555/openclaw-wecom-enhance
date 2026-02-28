@@ -1,8 +1,8 @@
 import type { ClawdbotConfig } from "openclaw/plugin-sdk";
 import { createWriteStream } from "node:fs";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { basename, join, resolve } from "node:path";
 import archiver from "archiver";
 
 import { getWecomRuntime } from "./runtime.js";
@@ -59,17 +59,65 @@ async function zipDirectory(sourceDir: string): Promise<{ zipPath: string; clean
   };
 }
 
+const SENDFILE_BLOCKED_PATHS = ["/etc", "/proc", "/sys", "/dev", "/var/run", "/root/.ssh", "/root/.gnupg"];
+
+function resolveSafeDirs(ctx: CommandContext): string[] {
+  const home = homedir();
+  const defaults = [
+    join(home, "Desktop"),
+    join(home, "Downloads"),
+    join(home, "Documents"),
+    tmpdir(),
+  ];
+  const custom = ctx.account.config.media?.searchPaths;
+  if (Array.isArray(custom)) {
+    for (const p of custom) {
+      if (typeof p === "string" && p.trim()) {
+        defaults.push(p.trim().replace(/^~/, home));
+      }
+    }
+  }
+  const tempDir = ctx.account.config.media?.tempDir;
+  if (typeof tempDir === "string" && tempDir.trim()) {
+    defaults.push(tempDir.trim());
+  }
+  return defaults;
+}
+
+async function isPathAllowed(filePath: string, safeDirs: string[]): Promise<boolean> {
+  try {
+    const resolved = await realpath(filePath);
+    // Block known sensitive paths
+    for (const blocked of SENDFILE_BLOCKED_PATHS) {
+      if (resolved === blocked || resolved.startsWith(blocked + "/")) return false;
+    }
+    // If safe dirs are configured, restrict to them
+    if (safeDirs.length > 0) {
+      return safeDirs.some((dir) => resolved === dir || resolved.startsWith(dir + "/"));
+    }
+    return true;
+  } catch {
+    return true; // let stat() handle non-existent paths
+  }
+}
+
 async function sendFiles(ctx: CommandContext, paths: string[]): Promise<{ sent: number; skipped: number }> {
   let sent = 0;
   let skipped = 0;
   const maxBytes = ctx.account.config.media?.maxBytes;
   const intervalMs = resolveSendIntervalMs(ctx.account.config);
   const logPath = ctx.account.config.operations?.logPath;
+  const safeDirs = resolveSafeDirs(ctx);
   for (const rawPath of paths) {
     const path = rawPath.startsWith("file://") ? rawPath.replace(/^file:\/\//, "") : rawPath;
     if (!path.startsWith("/")) {
       skipped += 1;
       await sendAndRecord(ctx, `⚠️ 路径需为绝对路径：${rawPath}`);
+      continue;
+    }
+    if (!(await isPathAllowed(path, safeDirs))) {
+      skipped += 1;
+      await sendAndRecord(ctx, `⚠️ 路径不在允许的目录范围内：${rawPath}`);
       continue;
     }
     let cleanup: (() => Promise<void>) | null = null;

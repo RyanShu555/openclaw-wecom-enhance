@@ -1,7 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import crypto from "node:crypto";
-import { mkdir, stat, writeFile } from "node:fs/promises";
-import { basename, join } from "node:path";
 
 import type { PluginRuntime } from "openclaw/plugin-sdk";
 
@@ -15,31 +13,11 @@ import {
   verifyWecomSignature,
 } from "./crypto.js";
 import {
-  downloadWecomMedia,
   fetchMediaFromUrl,
-  sendWecomFile,
-  sendWecomImage,
-  sendWecomVideo,
-  sendWecomVoice,
-  uploadWecomMedia,
 } from "./wecom-api.js";
 import { getWecomRuntime } from "./runtime.js";
-import { describeImageWithVision, resolveVisionConfig } from "./media-vision.js";
 import {
-  extractFileTextPreview,
-  resolveAutoAudioConfig,
-  resolveAutoFileConfig,
-  resolveAutoVideoConfig,
-  summarizeVideoWithVision,
-  transcribeAudioWithOpenAI,
-} from "./media-auto.js";
-import {
-  cleanupMediaDir,
-  resolveExtFromContentType,
   resolveMediaMaxBytes,
-  resolveMediaRetentionMs,
-  resolveMediaTempDir,
-  sanitizeFilename,
 } from "./media-utils.js";
 import {
   jsonOk,
@@ -53,27 +31,24 @@ import {
 } from "./shared/string-utils.js";
 import {
   buildInboundMediaPrompt,
-  isMediaTooLargeError,
-  loadOutboundMedia,
-  mediaFallbackExt,
   mediaFallbackLabel,
-  mediaSentLabel,
-  normalizeMediaType,
   parseBase64Input,
-  type MediaType,
 } from "./shared/media-shared.js";
 import {
   buildMediaCacheKey,
+  type MediaCacheEntry,
+  MEDIA_CACHE_MAX_ENTRIES,
 } from "./shared/cache-utils.js";
+import { dispatchOutboundMedia } from "./shared/dispatch-media.js";
+import { buildAgentContext } from "./shared/agent-context.js";
+import { processInboundMedia } from "./shared/media-inbound.js";
 
 const STREAM_TTL_MS = 10 * 60 * 1000;
 const STREAM_MAX_BYTES = 20_480;
 const STREAM_MAX_ENTRIES = 500;
 const DEDUPE_TTL_MS = 2 * 60 * 1000;
 const DEDUPE_MAX_ENTRIES = 2_000;
-const MEDIA_CACHE_MAX_ENTRIES = 200;
-
-const mediaCache = new Map<string, { entry: InboundMedia; createdAt: number; size: number; summary?: string }>();
+const mediaCache = new Map<string, MediaCacheEntry>();
 
 type StreamState = {
   streamId: string;
@@ -103,40 +78,14 @@ const streams = new Map<string, StreamState>();
 const msgidToStreamId = new Map<string, string>();
 const recentEncrypts = new Map<string, { ts: number; streamId?: string }>();
 
-function pruneMediaCache(): void {
-  if (mediaCache.size <= MEDIA_CACHE_MAX_ENTRIES) return;
-  const entries = Array.from(mediaCache.entries())
-    .sort((a, b) => a[1].createdAt - b[1].createdAt);
-  const excess = entries.length - MEDIA_CACHE_MAX_ENTRIES;
-  for (let i = 0; i < excess; i += 1) {
-    mediaCache.delete(entries[i]![0]);
-  }
+import { getCachedMedia as getCachedMediaShared, storeCachedMedia as storeCachedMediaShared } from "./shared/cache-utils.js";
+
+async function getBotCachedMedia(key: string | null, retentionMs?: number): Promise<MediaCacheEntry | null> {
+  return getCachedMediaShared(mediaCache, key, retentionMs);
 }
 
-async function getCachedMedia(
-  key: string | null,
-  retentionMs?: number,
-): Promise<{ media: InboundMedia; summary?: string } | null> {
-  if (!key) return null;
-  const cached = mediaCache.get(key);
-  if (!cached) return null;
-  if (retentionMs && Date.now() - cached.createdAt > retentionMs) {
-    mediaCache.delete(key);
-    return null;
-  }
-  try {
-    await stat(cached.entry.path);
-  } catch {
-    mediaCache.delete(key);
-    return null;
-  }
-  return { media: cached.entry, summary: cached.summary };
-}
-
-function storeCachedMedia(key: string | null, entry: InboundMedia, size: number, summary?: string): void {
-  if (!key) return;
-  mediaCache.set(key, { entry, createdAt: Date.now(), size, summary });
-  pruneMediaCache();
+function storeBotCachedMedia(key: string | null, entry: MediaCacheEntry): void {
+  storeCachedMediaShared(mediaCache, key, entry, MEDIA_CACHE_MAX_ENTRIES);
 }
 
 function pruneStreams(): void {
@@ -277,8 +226,6 @@ async function startAgentForStream(params: {
   streamId: string;
 }): Promise<void> {
   const { target, msg, streamId } = params;
-  const core = getWecomRuntime();
-  const config = target.config;
   const account = target.account;
 
   const userid = msg.from?.userid?.trim() || "unknown";
@@ -287,61 +234,17 @@ async function startAgentForStream(params: {
   const inbound = await buildInboundBody({ target, msg });
   const rawBody = inbound.text;
 
-  const route = core.channel.routing.resolveAgentRoute({
-    cfg: config,
-    channel: "wecom",
-    accountId: account.accountId,
-    peer: { kind: chatType === "group" ? "group" : "dm", id: chatId },
+  const { core, route, storePath, ctxPayload, tableMode } = buildAgentContext({
+    target,
+    fromUser: userid,
+    chatId: chatType === "group" ? chatId : undefined,
+    isGroup: chatType === "group",
+    messageText: rawBody,
+    messageSid: msg.msgid ? String(msg.msgid) : undefined,
+    media: inbound.media,
   });
 
   logVerbose(target, `starting agent processing (streamId=${streamId}, agentId=${route.agentId}, peerKind=${chatType}, peerId=${chatId})`);
-
-  const fromLabel = chatType === "group" ? `group:${chatId}` : `user:${userid}`;
-  const storePath = core.channel.session.resolveStorePath(config.session?.store, {
-    agentId: route.agentId,
-  });
-  const envelopeOptions = core.channel.reply.resolveEnvelopeFormatOptions(config);
-  const previousTimestamp = core.channel.session.readSessionUpdatedAt({
-    storePath,
-    sessionKey: route.sessionKey,
-  });
-  const body = core.channel.reply.formatAgentEnvelope({
-    channel: "WeCom",
-    from: fromLabel,
-    previousTimestamp,
-    envelope: envelopeOptions,
-    body: rawBody,
-  });
-
-  const ctxPayload = core.channel.reply.finalizeInboundContext({
-    Body: body,
-    RawBody: rawBody,
-    CommandBody: rawBody,
-    From: chatType === "group" ? `wecom:group:${chatId}` : `wecom:${userid}`,
-    To: `wecom:${chatId}`,
-    SessionKey: route.sessionKey,
-    AccountId: route.accountId,
-    ChatType: chatType,
-    ConversationLabel: fromLabel,
-    SenderName: userid,
-    SenderId: userid,
-    Provider: "wecom",
-    Surface: "wecom",
-    MessageSid: msg.msgid,
-    OriginatingChannel: "wecom",
-    OriginatingTo: `wecom:${chatId}`,
-  });
-
-  if (inbound.media) {
-    ctxPayload.MediaPath = inbound.media.path;
-    ctxPayload.MediaType = inbound.media.type;
-    if (inbound.media.mimeType) {
-      (ctxPayload as any).MediaMimeType = inbound.media.mimeType;
-    }
-    if (inbound.media.url) {
-      ctxPayload.MediaUrl = inbound.media.url;
-    }
-  }
 
   await core.channel.session.recordInboundSession({
     storePath,
@@ -352,15 +255,9 @@ async function startAgentForStream(params: {
     },
   });
 
-  const tableMode = core.channel.text.resolveMarkdownTableMode({
-    cfg: config,
-    channel: "wecom",
-    accountId: account.accountId,
-  });
-
   await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,
-    cfg: config,
+    cfg: target.config,
     dispatcherOptions: {
       deliver: async (payload) => {
         const canBridgeMedia = account.config.botMediaBridge !== false
@@ -369,37 +266,22 @@ async function startAgentForStream(params: {
 
         if (canBridgeMedia) {
           try {
-            const outbound = await loadOutboundMedia({
+            const result = await dispatchOutboundMedia({
               payload,
               account,
+              toUser: userid,
+              chatId: toChatId,
               maxBytes: resolveMediaMaxBytes(target),
             });
-            if (outbound) {
-            const mediaId = await uploadWecomMedia({
-              account,
-              type: outbound.type,
-              buffer: outbound.buffer,
-              filename: outbound.filename,
-            });
-            if (outbound.type === "image") {
-              await sendWecomImage({ account, toUser: userid, chatId: toChatId, mediaId });
-            } else if (outbound.type === "voice") {
-              await sendWecomVoice({ account, toUser: userid, chatId: toChatId, mediaId });
-            } else if (outbound.type === "video") {
-              const title = (payload as any).title as string | undefined;
-              const description = (payload as any).description as string | undefined;
-              await sendWecomVideo({ account, toUser: userid, chatId: toChatId, mediaId, title, description });
-            } else if (outbound.type === "file") {
-              await sendWecomFile({ account, toUser: userid, chatId: toChatId, mediaId });
-            }
-            const current = streams.get(streamId);
-            if (current) {
-              const note = mediaSentLabel(outbound.type);
-              const nextText = current.content ? `${current.content}\n\n${note}` : note;
-              current.content = truncateUtf8Bytes(nextText.trim(), STREAM_MAX_BYTES);
-              current.updatedAt = Date.now();
-            }
-            target.statusSink?.({ lastOutboundAt: Date.now() });
+            if (result.sent) {
+              const current = streams.get(streamId);
+              if (current) {
+                const note = result.label ?? "[已发送媒体]";
+                const nextText = current.content ? `${current.content}\n\n${note}` : note;
+                current.content = truncateUtf8Bytes(nextText.trim(), STREAM_MAX_BYTES);
+                current.updatedAt = Date.now();
+              }
+              target.statusSink?.({ lastOutboundAt: Date.now() });
             }
           } catch (err) {
             target.runtime.error?.(`[${account.accountId}] wecom bot media bridge failed: ${String(err)}`);
@@ -597,194 +479,87 @@ async function buildBotMediaMessage(params: {
     };
   }
 
-  try {
-    const cacheKey = buildMediaCacheKey({ url, base64, mediaId });
-    const cached = await getCachedMedia(cacheKey, resolveMediaRetentionMs(target));
-    if (cached) {
-      if (msgtype === "image" && cached.summary) {
-        return {
-          text: `[用户发送了一张图片]\n\n[图片识别结果]\n${cached.summary}\n\n请根据识别结果回复用户（无需使用 Read 工具读取图片文件）。`,
-          media: cached.media,
-        };
-      }
-      if (msgtype === "file") {
-        const safeName = sanitizeFilename(filename || basename(cached.media.path), "file");
-        const fileCfg = resolveAutoFileConfig(target.account.config);
-        const preview = fileCfg
-          ? await extractFileTextPreview({ path: cached.media.path, mimeType: cached.media.mimeType, cfg: fileCfg })
-          : null;
-        return {
-          text: preview
-            ? `[用户发送了一个文件: ${safeName}，已保存到: ${cached.media.path}]\n\n[文件内容预览]\n${preview}\n\n如需更多内容请使用 Read 工具。`
-            : `[用户发送了一个文件: ${safeName}，已保存到: ${cached.media.path}]\n\n请使用 Read 工具查看这个文件的内容并回复用户。`,
-          media: cached.media,
-        };
-      }
-      return {
-        text: buildInboundMediaPrompt(msgtype, filename),
-        media: cached.media,
-      };
-    }
+  // Bot 特有：base64 数据需要先解码为 URL 或直接处理
+  // Bot 特有：URL 数据可能需要 AES 解密
+  // 对于这些情况，先预处理为 URL，再交给 processInboundMedia
+  let resolvedUrl = url;
 
-    let buffer: Buffer | null = null;
-    let contentType = "";
-    const maxBytes = resolveMediaMaxBytes(target);
-    if (base64) {
-      const parsed = parseBase64Input(base64);
-      buffer = Buffer.from(parsed.data, "base64");
-      if (parsed.mimeType) contentType = parsed.mimeType;
-      if (!contentType) {
+  if (base64) {
+    // base64 模式：bot 独有，需要先保存到临时文件再处理
+    // 这种情况较少见，保留内联处理
+    const parsed = parseBase64Input(base64);
+    const buffer = Buffer.from(parsed.data, "base64");
+    const { mkdir, writeFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const { resolveMediaTempDir, resolveExtFromContentType, sanitizeFilename } = await import("./media-utils.js");
+    const { mediaFallbackExt } = await import("./shared/media-shared.js");
+    let contentType = parsed.mimeType ?? "";
+    if (!contentType) {
+      if (msgtype === "image") contentType = "image/jpeg";
+      else if (msgtype === "voice") contentType = "audio/amr";
+      else if (msgtype === "video") contentType = "video/mp4";
+      else contentType = "application/octet-stream";
+    }
+    const tempDir = resolveMediaTempDir(target);
+    await mkdir(tempDir, { recursive: true });
+    const ext = resolveExtFromContentType(contentType, mediaFallbackExt(msgtype));
+    const safeName = msgtype === "file"
+      ? sanitizeFilename(filename || "", `file-${Date.now()}.${ext}`)
+      : `${msgtype}-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`;
+    const tempPath = join(tempDir, safeName);
+    await writeFile(tempPath, buffer);
+    const media = { path: tempPath, type: msgtype, mimeType: contentType, url };
+    storeBotCachedMedia(buildMediaCacheKey({ base64 }), {
+      path: tempPath, type: msgtype, mimeType: contentType, createdAt: Date.now(), size: buffer.length,
+    });
+    return { text: buildInboundMediaPrompt(msgtype, filename), media };
+  }
+
+  if (resolvedUrl) {
+    // Bot URL 可能需要 AES 解密 — 先下载并解密，保存后走 processInboundMedia 的缓存路径
+    const aesKey = target.account.encodingAESKey || "";
+    if (aesKey) {
+      try {
+        const maxBytes = resolveMediaMaxBytes(target);
+        const fetched = await fetchMediaFromUrl(resolvedUrl, target.account, maxBytes);
+        const decrypted = decryptWecomMedia({ encodingAESKey: aesKey, buffer: fetched.buffer });
+        const { mkdir, writeFile } = await import("node:fs/promises");
+        const { join } = await import("node:path");
+        const { resolveMediaTempDir, resolveExtFromContentType, cleanupMediaDir } = await import("./media-utils.js");
+        const { mediaFallbackExt } = await import("./shared/media-shared.js");
+        let contentType = "";
         if (msgtype === "image") contentType = "image/jpeg";
         else if (msgtype === "voice") contentType = "audio/amr";
         else if (msgtype === "video") contentType = "video/mp4";
         else contentType = "application/octet-stream";
+        const tempDir = resolveMediaTempDir(target);
+        await mkdir(tempDir, { recursive: true });
+        await cleanupMediaDir(tempDir, target.account.config.media?.retentionHours, target.account.config.media?.cleanupOnStart);
+        const ext = resolveExtFromContentType(contentType, mediaFallbackExt(msgtype));
+        const tempPath = join(tempDir, `${msgtype}-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`);
+        await writeFile(tempPath, decrypted);
+        const media = { path: tempPath, type: msgtype, mimeType: contentType, url: resolvedUrl };
+        storeBotCachedMedia(buildMediaCacheKey({ url: resolvedUrl }), {
+          path: tempPath, type: msgtype, mimeType: contentType, url: resolvedUrl, createdAt: Date.now(), size: decrypted.length,
+        });
+        return { text: buildInboundMediaPrompt(msgtype, filename), media };
+      } catch (err) {
+        target.runtime.error?.(`[${target.account.accountId}] wecom bot media decrypt failed: ${String(err)}`);
+        // 解密失败，回退到普通 URL 下载
       }
-    } else if (url) {
-      const media = await fetchMediaFromUrl(url, target.account, maxBytes);
-      const aesKey = target.account.encodingAESKey || "";
-      if (aesKey) {
-        try {
-          buffer = decryptWecomMedia({ encodingAESKey: aesKey, buffer: media.buffer });
-          if (msgtype === "image") contentType = "image/jpeg";
-          else if (msgtype === "voice") contentType = "audio/amr";
-          else if (msgtype === "video") contentType = "video/mp4";
-          else contentType = "application/octet-stream";
-        } catch (err) {
-          target.runtime.error?.(`[${target.account.accountId}] wecom bot media decrypt failed: ${String(err)}`);
-          buffer = media.buffer;
-          contentType = media.contentType;
-        }
-      } else {
-        buffer = media.buffer;
-        contentType = media.contentType;
-      }
-    } else if (mediaId && hasAppCreds) {
-      const media = await downloadWecomMedia({ account: target.account, mediaId, maxBytes });
-      buffer = media.buffer;
-      contentType = media.contentType;
     }
-
-    if (!buffer) return { text: fallbackLabel };
-
-    if (maxBytes && buffer.length > maxBytes) {
-      if (msgtype === "image") return { text: "[图片过大，未处理]\n\n请发送更小的图片。" };
-      if (msgtype === "voice") return { text: "[语音消息过大，未处理]\n\n请发送更短的语音消息。" };
-      if (msgtype === "video") return { text: "[视频过大，未处理]\n\n请发送更小的视频。" };
-      return { text: "[文件过大，未处理]\n\n请发送更小的文件。" };
-    }
-
-    const tempDir = resolveMediaTempDir(target);
-    await mkdir(tempDir, { recursive: true });
-    await cleanupMediaDir(
-      tempDir,
-      target.account.config.media?.retentionHours,
-      target.account.config.media?.cleanupOnStart,
-    );
-
-    const ext = resolveExtFromContentType(contentType, mediaFallbackExt(msgtype));
-
-    if (msgtype === "file") {
-      const safeName = sanitizeFilename(filename || "", `file-${Date.now()}.${ext}`);
-      const tempFilePath = join(tempDir, safeName);
-      await writeFile(tempFilePath, buffer);
-      const media: InboundMedia = {
-        path: tempFilePath,
-        type: "file",
-        mimeType: contentType || "application/octet-stream",
-        url,
-      };
-      storeCachedMedia(cacheKey, media, buffer.length);
-      const fileCfg = resolveAutoFileConfig(target.account.config);
-      const preview = fileCfg
-        ? await extractFileTextPreview({ path: tempFilePath, mimeType: media.mimeType, cfg: fileCfg })
-        : null;
-      return {
-        text: preview
-          ? `[用户发送了一个文件: ${safeName}，已保存到: ${tempFilePath}]\n\n[文件内容预览]\n${preview}\n\n如需更多内容请使用 Read 工具。`
-          : `[用户发送了一个文件: ${safeName}，已保存到: ${tempFilePath}]\n\n请使用 Read 工具查看这个文件的内容并回复用户。`,
-        media,
-      };
-    }
-
-    const tempPath = join(
-      tempDir,
-      `${msgtype}-${Date.now()}-${Math.random().toString(36).slice(2)}.${ext}`,
-    );
-    await writeFile(tempPath, buffer);
-
-    if (msgtype === "image") {
-      const media: InboundMedia = {
-        path: tempPath,
-        type: "image",
-        mimeType: contentType || "image/jpeg",
-        url,
-      };
-      const visionConfig = resolveVisionConfig(target.account.config, target.config);
-      const summary = visionConfig
-        ? await describeImageWithVision({
-          config: visionConfig,
-          buffer,
-          mimeType: media.mimeType || "image/jpeg",
-        })
-        : null;
-      storeCachedMedia(cacheKey, media, buffer.length, summary ?? undefined);
-      return {
-        text: summary
-          ? `[用户发送了一张图片]\n\n[图片识别结果]\n${summary}\n\n请根据识别结果回复用户（无需使用 Read 工具读取图片文件）。`
-          : buildInboundMediaPrompt("image"),
-        media,
-      };
-    }
-    if (msgtype === "voice") {
-      const media: InboundMedia = {
-        path: tempPath,
-        type: "voice",
-        mimeType: contentType || "audio/amr",
-        url,
-      };
-      storeCachedMedia(cacheKey, media, buffer.length);
-      const audioCfg = resolveAutoAudioConfig(target.account.config);
-      const transcript = audioCfg
-        ? await transcribeAudioWithOpenAI({ cfg: audioCfg, buffer, mimeType: media.mimeType })
-        : null;
-      return {
-        text: transcript ? `[语音消息转写] ${transcript}` : buildInboundMediaPrompt("voice"),
-        media,
-      };
-    }
-    if (msgtype === "video") {
-      const media: InboundMedia = {
-        path: tempPath,
-        type: "video",
-        mimeType: contentType || "video/mp4",
-        url,
-      };
-      storeCachedMedia(cacheKey, media, buffer.length);
-      const videoCfg = resolveAutoVideoConfig(target.account.config);
-      const summary = videoCfg
-        ? await summarizeVideoWithVision({ cfg: videoCfg, account: target.account.config, videoPath: tempPath })
-        : null;
-      return {
-        text: summary
-          ? `[用户发送了一个视频文件]\n\n[视频画面概述]\n${summary}\n\n请根据视频内容回复用户。`
-          : buildInboundMediaPrompt("video"),
-        media,
-      };
-    }
-    return { text: fallbackLabel };
-  } catch (err) {
-    target.runtime.error?.(`wecom bot ${msgtype} download failed: ${String(err)}`);
-    if (isMediaTooLargeError(err)) {
-      if (msgtype === "image") return { text: "[图片过大，未处理]\n\n请发送更小的图片。" };
-      if (msgtype === "voice") return { text: "[语音消息过大，未处理]\n\n请发送更短的语音消息。" };
-      if (msgtype === "video") return { text: "[视频过大，未处理]\n\n请发送更小的视频。" };
-      return { text: "[文件过大，未处理]\n\n请发送更小的文件。" };
-    }
-    if (msgtype === "image") return { text: "[用户发送了一张图片，但下载失败]\n\n请告诉用户图片处理暂时不可用。" };
-    if (msgtype === "voice") return { text: "[用户发送了一条语音消息，但下载失败]\n\n请告诉用户语音处理暂时不可用。" };
-    if (msgtype === "video") return { text: "[用户发送了一个视频，但下载失败]\n\n请告诉用户视频处理暂时不可用。" };
-    return { text: "[用户发送了一个文件，但下载失败]\n\n请告诉用户文件处理暂时不可用。" };
   }
+
+  // 标准路径：URL 或 mediaId，交给共享的 processInboundMedia
+  return processInboundMedia({
+    target,
+    msgtype,
+    mediaId: mediaId || undefined,
+    url: resolvedUrl || undefined,
+    filename,
+    getCache: getBotCachedMedia,
+    storeCache: storeBotCachedMedia,
+  });
 }
 
 async function buildInboundBody(params: { target: WecomWebhookTarget; msg: WecomInboundMessage }): Promise<InboundBody> {
@@ -863,10 +638,11 @@ export async function handleWecomBotWebhook(params: {
   req: IncomingMessage;
   res: ServerResponse;
   targets: WecomWebhookTarget[];
+  rawBody?: string;
 }): Promise<boolean> {
   pruneStreams();
 
-  const { req, res, targets } = params;
+  const { req, res, targets, rawBody } = params;
   const botTargets = targets.filter((candidate) => shouldHandleBot(candidate.account));
   if (botTargets.length === 0) {
     return false;
@@ -927,13 +703,28 @@ export async function handleWecomBotWebhook(params: {
     return false;
   }
 
-  const body = await readJsonBody(req, 1024 * 1024);
-  if (!body.ok) {
-    res.statusCode = body.error === "payload too large" ? 413 : 400;
-    res.end(body.error ?? "invalid payload");
-    return true;
+  // Parse body from pre-read rawBody instead of reading stream again
+  let record: Record<string, unknown> | null = null;
+  if (rawBody != null) {
+    const trimmed = rawBody.trim();
+    if (!trimmed) {
+      return false; // empty body, not a bot request
+    }
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      record = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+    } catch {
+      return false; // not JSON, let app handler try XML
+    }
+  } else {
+    const body = await readJsonBody(req, 1024 * 1024);
+    if (!body.ok) {
+      res.statusCode = body.error === "payload too large" ? 413 : 400;
+      res.end(body.error ?? "invalid payload");
+      return true;
+    }
+    record = body.value && typeof body.value === "object" ? (body.value as Record<string, unknown>) : null;
   }
-  const record = body.value && typeof body.value === "object" ? (body.value as Record<string, unknown>) : null;
   const encrypt = record ? String(record.encrypt ?? record.Encrypt ?? "") : "";
   if (!encrypt) {
     res.statusCode = 400;

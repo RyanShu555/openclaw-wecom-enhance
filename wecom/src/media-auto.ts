@@ -5,6 +5,7 @@ import { extname, join } from "node:path";
 
 import type { WecomAccountConfig } from "./types.js";
 import { describeImageWithVision, resolveVisionConfig } from "./media-vision.js";
+import { truncateText } from "./shared/string-utils.js";
 
 const DEFAULT_TEXT_EXTENSIONS = ["txt", "md", "log", "csv", "json", "xml", "yaml", "yml"];
 
@@ -184,6 +185,8 @@ export async function transcribeAudioWithOpenAI(params: {
   }
 }
 
+const FFMPEG_TIMEOUT_MS = 60_000;
+
 async function runFfmpegExtractFrame(params: {
   ffmpegPath: string;
   videoPath: string;
@@ -200,8 +203,13 @@ async function runFfmpegExtractFrame(params: {
       "2",
       params.framePath,
     ]);
-    proc.on("error", reject);
+    const timer = setTimeout(() => {
+      proc.kill("SIGKILL");
+      reject(new Error("ffmpeg timed out"));
+    }, FFMPEG_TIMEOUT_MS);
+    proc.on("error", (err) => { clearTimeout(timer); reject(err); });
     proc.on("close", (code) => {
+      clearTimeout(timer);
       if (code === 0) resolve();
       else reject(new Error(`ffmpeg exited with code ${code ?? "unknown"}`));
     });
@@ -228,18 +236,20 @@ async function runFfmpegExtractFrames(params: {
       "2",
       params.outputPattern,
     ]);
-    proc.on("error", reject);
+    const timer = setTimeout(() => {
+      proc.kill("SIGKILL");
+      reject(new Error("ffmpeg timed out"));
+    }, FFMPEG_TIMEOUT_MS);
+    proc.on("error", (err) => { clearTimeout(timer); reject(err); });
     proc.on("close", (code) => {
+      clearTimeout(timer);
       if (code === 0) resolve();
       else reject(new Error(`ffmpeg exited with code ${code ?? "unknown"}`));
     });
   });
 }
 
-function truncateText(text: string, maxChars: number): string {
-  if (text.length <= maxChars) return text;
-  return `${text.slice(0, maxChars)}…`;
-}
+
 
 export async function summarizeVideoWithVision(params: {
   cfg: ResolvedAutoVideoConfig;

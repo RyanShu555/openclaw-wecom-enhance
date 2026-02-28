@@ -1,5 +1,7 @@
 import { splitWecomText } from "./format.js";
 import type { ResolvedWecomAccount } from "./types.js";
+import { sleep } from "./shared/string-utils.js";
+import { MEDIA_TOO_LARGE_ERROR } from "./shared/media-shared.js";
 
 export type WecomTokenState = {
   token: string | null;
@@ -61,7 +63,6 @@ class RateLimiter {
 
 const accessTokenCaches = new Map<string, WecomTokenState>();
 const apiLimiter = new RateLimiter({ maxConcurrent: 3, minInterval: 200 });
-export const MEDIA_TOO_LARGE_ERROR = "MEDIA_TOO_LARGE";
 
 function ensureAppConfig(account: ResolvedWecomAccount): { corpId: string; corpSecret: string; agentId: number } {
   const corpId = account.corpId ?? "";
@@ -79,10 +80,6 @@ function resolveNetworkConfig(account: ResolvedWecomAccount): { timeoutMs: numbe
   const retries = typeof cfg.retries === "number" && cfg.retries >= 0 ? cfg.retries : 2;
   const retryDelayMs = typeof cfg.retryDelayMs === "number" && cfg.retryDelayMs >= 0 ? cfg.retryDelayMs : 300;
   return { timeoutMs, retries, retryDelayMs };
-}
-
-async function sleep(ms: number): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function fetchWithRetry(account: ResolvedWecomAccount, input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
@@ -149,7 +146,7 @@ export async function getWecomAccessToken(account: ResolvedWecomAccount): Promis
       const tokenRes = await fetchWithRetry(account, tokenUrl);
       const tokenJson = await tokenRes.json();
       if (!tokenJson?.access_token) {
-        throw new Error(`WeCom gettoken failed: ${JSON.stringify(tokenJson)}`);
+        throw new Error(`WeCom gettoken failed: errcode=${tokenJson?.errcode ?? "unknown"}, errmsg=${tokenJson?.errmsg ?? "unknown"}`);
       }
 
       cache.token = tokenJson.access_token;
@@ -189,7 +186,7 @@ async function sendWecomTextSingle(params: {
   });
   const sendJson = await sendRes.json();
   if (sendJson?.errcode !== 0) {
-    throw new Error(`WeCom message/send failed: ${JSON.stringify(sendJson)}`);
+    throw new Error(`WeCom message/send failed: errcode=${sendJson?.errcode}, errmsg=${sendJson?.errmsg ?? "unknown"}`);
   }
 }
 
@@ -226,7 +223,7 @@ export async function uploadWecomMedia(params: {
   });
   const json = await res.json();
   if (!json?.media_id) {
-    throw new Error(`WeCom media upload failed: ${JSON.stringify(json)}`);
+    throw new Error(`WeCom media upload failed: errcode=${json?.errcode}, errmsg=${json?.errmsg ?? "unknown"}`);
   }
   return json.media_id;
 }
@@ -268,7 +265,7 @@ export async function sendWecomMedia(params: {
   });
   const sendJson = await sendRes.json();
   if (sendJson?.errcode !== 0) {
-    throw new Error(`WeCom ${mediaType} send failed: ${JSON.stringify(sendJson)}`);
+    throw new Error(`WeCom ${mediaType} send failed: errcode=${sendJson?.errcode}, errmsg=${sendJson?.errmsg ?? "unknown"}`);
   }
 }
 
@@ -332,7 +329,7 @@ export async function downloadWecomMedia(params: {
   ensureNotTooLarge(res, maxBytes);
   if (contentType.includes("application/json")) {
     const json = await res.json();
-    throw new Error(`WeCom media download failed: ${JSON.stringify(json)}`);
+    throw new Error(`WeCom media download failed: errcode=${json?.errcode}, errmsg=${json?.errmsg ?? "unknown"}`);
   }
 
   const buffer = Buffer.from(await res.arrayBuffer());

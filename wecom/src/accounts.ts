@@ -81,7 +81,8 @@ export function resolveWecomAccount(params: {
     || resolveAccountEnv(params.cfg, accountId, "CORP_SECRET")
     || undefined;
   const agentIdRaw = merged.agentId != null ? String(merged.agentId) : resolveAccountEnv(params.cfg, accountId, "AGENT_ID");
-  const agentId = agentIdRaw != null ? Number(agentIdRaw) : undefined;
+  const agentIdNum = agentIdRaw != null ? Number(agentIdRaw) : NaN;
+  const agentId = Number.isFinite(agentIdNum) && agentIdNum > 0 ? agentIdNum : undefined;
   const callbackToken = merged.callbackToken?.trim()
     || resolveAccountEnv(params.cfg, accountId, "CALLBACK_TOKEN")
     || undefined;

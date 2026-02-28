@@ -29,6 +29,10 @@ export function truncateText(text: string, maxChars: number): string {
 export function truncateUtf8Bytes(text: string, maxBytes: number): string {
   const buf = Buffer.from(text, "utf8");
   if (buf.length <= maxBytes) return text;
-  const slice = buf.subarray(buf.length - maxBytes);
-  return slice.toString("utf8");
+  let end = maxBytes;
+  // Walk back to a valid UTF-8 character boundary
+  while (end > 0 && (buf[end]! & 0xc0) === 0x80) {
+    end -= 1;
+  }
+  return buf.subarray(0, end).toString("utf8");
 }
