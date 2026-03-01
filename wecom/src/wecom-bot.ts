@@ -21,7 +21,7 @@ import {
 } from "./media-utils.js";
 import {
   jsonOk,
-  readJsonBody,
+  readRequestBody,
   resolveQueryParams,
   resolveSignatureParam,
 } from "./shared/http-utils.js";
@@ -147,14 +147,6 @@ function shouldFallbackToDm(state: StreamState): boolean {
 function appendDmContent(state: StreamState, text: string): void {
   const next = state.dmContent ? `${state.dmContent}\n\n${text}`.trim() : text.trim();
   state.dmContent = truncateUtf8Bytes(next, 200_000);
-}
-
-async function sendAgentDmText(params: {
-  account: ResolvedWecomAccount;
-  userId: string;
-  text: string;
-}): Promise<void> {
-  await sendWecomText({ account: params.account, toUser: params.userId, text: params.text });
 }
 
 function buildFallbackPrompt(params: {
@@ -496,7 +488,7 @@ async function startAgentForStream(params: {
       const agentConfigured = Boolean(account.corpId && account.corpSecret && account.agentId);
       if (agentConfigured) {
         try {
-          await sendAgentDmText({ account, userId: userid, text: current.dmContent.trim() });
+          await sendWecomText({ account, toUser: userid, text: current.dmContent.trim() });
           target.statusSink?.({ lastOutboundAt: Date.now() });
         } catch (err) {
           target.runtime.error?.(`[${account.accountId}] wecom bot DM fallback failed: ${String(err)}`);
@@ -870,13 +862,27 @@ export async function handleWecomBotWebhook(params: {
       return false; // not JSON, let app handler try XML
     }
   } else {
-    const body = await readJsonBody(req, 1024 * 1024);
-    if (!body.ok) {
-      res.statusCode = body.error === "payload too large" ? 413 : 400;
-      res.end(body.error ?? "invalid payload");
+    let raw: string;
+    try {
+      raw = await readRequestBody(req, 1024 * 1024);
+    } catch {
+      res.statusCode = 413;
+      res.end("payload too large");
       return true;
     }
-    record = body.value && typeof body.value === "object" ? (body.value as Record<string, unknown>) : null;
+    if (!raw.trim()) {
+      res.statusCode = 400;
+      res.end("empty payload");
+      return true;
+    }
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      record = parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+    } catch {
+      res.statusCode = 400;
+      res.end("invalid JSON");
+      return true;
+    }
   }
   const encrypt = record ? String(record.encrypt ?? record.Encrypt ?? "") : "";
   if (!encrypt) {

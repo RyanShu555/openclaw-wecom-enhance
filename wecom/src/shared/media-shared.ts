@@ -9,6 +9,21 @@ import type { ResolvedWecomAccount } from "../types.js";
 export const MEDIA_TOO_LARGE_ERROR = "MEDIA_TOO_LARGE";
 
 /**
+ * 受限系统目录列表
+ */
+export const BLOCKED_SYSTEM_PATHS = ["/etc", "/proc", "/sys", "/dev", "/var/run"];
+
+/**
+ * 检查路径是否在受限系统目录中
+ */
+export function isBlockedPath(resolved: string): boolean {
+  for (const prefix of BLOCKED_SYSTEM_PATHS) {
+    if (resolved === prefix || resolved.startsWith(prefix + "/")) return true;
+  }
+  return false;
+}
+
+/**
  * 媒体类型常量映射
  */
 export const MEDIA_LABELS: Record<string, string> = {
@@ -110,12 +125,8 @@ export function resolveMediaTypeFromContentType(contentType: string): MediaType 
 export function stripFileProtocol(rawPath: string): string {
   const stripped = rawPath.startsWith("file://") ? rawPath.replace(/^file:\/\//, "") : rawPath;
   const resolved = resolvePath(stripped);
-  // 阻止路径遍历到敏感系统目录
-  const blocked = ["/etc", "/proc", "/sys", "/dev", "/var/run"];
-  for (const prefix of blocked) {
-    if (resolved === prefix || resolved.startsWith(prefix + "/")) {
-      throw new Error(`Access denied: path ${resolved} is in a restricted directory`);
-    }
+  if (isBlockedPath(resolved)) {
+    throw new Error(`Access denied: path ${resolved} is in a restricted directory`);
   }
   return resolved;
 }

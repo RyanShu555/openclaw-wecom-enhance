@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import type { WecomWebhookTarget } from "./monitor.js";
+import { isBlockedPath } from "./shared/media-shared.js";
+import { numOpt } from "./shared/string-utils.js";
 
 const cleanupExecuted = new Map<string, number>();
 const CLEANUP_CACHE_MAX = 200;
@@ -73,24 +75,19 @@ export function resolveMediaTempDir(target: WecomWebhookTarget): string {
   const raw = target.account.config.media?.tempDir?.trim();
   if (!raw) return join(tmpdir(), "openclaw-wecom");
   const resolved = resolve(raw);
-  // 阻止配置指向敏感系统目录
-  const blocked = ["/etc", "/proc", "/sys", "/dev", "/var/run"];
-  for (const prefix of blocked) {
-    if (resolved === prefix || resolved.startsWith(prefix + "/")) {
-      return join(tmpdir(), "openclaw-wecom");
-    }
+  if (isBlockedPath(resolved)) {
+    return join(tmpdir(), "openclaw-wecom");
   }
   return resolved;
 }
 
 export function resolveMediaMaxBytes(target: WecomWebhookTarget): number | undefined {
-  const maxBytes = target.account.config.media?.maxBytes;
-  return typeof maxBytes === "number" && maxBytes > 0 ? maxBytes : undefined;
+  return numOpt(target.account.config.media?.maxBytes);
 }
 
 export function resolveMediaRetentionMs(target: WecomWebhookTarget): number | undefined {
-  const hours = target.account.config.media?.retentionHours;
-  return typeof hours === "number" && hours > 0 ? hours * 3600 * 1000 : undefined;
+  const hours = numOpt(target.account.config.media?.retentionHours);
+  return hours ? hours * 3600 * 1000 : undefined;
 }
 
 export function sanitizeFilename(name: string, fallback: string): string {

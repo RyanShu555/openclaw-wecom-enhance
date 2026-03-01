@@ -1,6 +1,6 @@
 import { splitWecomText } from "./format.js";
 import type { ResolvedWecomAccount } from "./types.js";
-import { sleep } from "./shared/string-utils.js";
+import { sleep, num } from "./shared/string-utils.js";
 import { MEDIA_TOO_LARGE_ERROR } from "./shared/media-shared.js";
 
 // ── 出站代理支持 ──
@@ -105,10 +105,11 @@ function ensureAppConfig(account: ResolvedWecomAccount): { corpId: string; corpS
 
 function resolveNetworkConfig(account: ResolvedWecomAccount): { timeoutMs: number; retries: number; retryDelayMs: number } {
   const cfg = account.config.network ?? {};
-  const timeoutMs = typeof cfg.timeoutMs === "number" && cfg.timeoutMs > 0 ? cfg.timeoutMs : 15000;
-  const retries = typeof cfg.retries === "number" && cfg.retries >= 0 ? cfg.retries : 2;
-  const retryDelayMs = typeof cfg.retryDelayMs === "number" && cfg.retryDelayMs >= 0 ? cfg.retryDelayMs : 300;
-  return { timeoutMs, retries, retryDelayMs };
+  return {
+    timeoutMs: num(cfg.timeoutMs, 15000),
+    retries: typeof cfg.retries === "number" && cfg.retries >= 0 ? cfg.retries : 2,
+    retryDelayMs: typeof cfg.retryDelayMs === "number" && cfg.retryDelayMs >= 0 ? cfg.retryDelayMs : 300,
+  };
 }
 
 async function fetchWithRetry(account: ResolvedWecomAccount, input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
@@ -300,38 +301,6 @@ export async function sendWecomMedia(params: {
   if (sendJson?.errcode !== 0) {
     throw new Error(`WeCom ${mediaType} send failed: errcode=${sendJson?.errcode}, errmsg=${sendJson?.errmsg ?? "unknown"}`);
   }
-}
-
-// 便捷方法：发送图片
-export async function sendWecomImage(params: {
-  account: ResolvedWecomAccount;
-  toUser: string;
-  chatId?: string;
-  mediaId: string;
-}): Promise<void> {
-  return sendWecomMedia({ ...params, mediaType: "image" });
-}
-
-// 便捷方法：发送语音
-export async function sendWecomVoice(params: {
-  account: ResolvedWecomAccount;
-  toUser: string;
-  chatId?: string;
-  mediaId: string;
-}): Promise<void> {
-  return sendWecomMedia({ ...params, mediaType: "voice" });
-}
-
-// 便捷方法：发送视频
-export async function sendWecomVideo(params: {
-  account: ResolvedWecomAccount;
-  toUser: string;
-  chatId?: string;
-  mediaId: string;
-  title?: string;
-  description?: string;
-}): Promise<void> {
-  return sendWecomMedia({ ...params, mediaType: "video" });
 }
 
 // 便捷方法：发送文件

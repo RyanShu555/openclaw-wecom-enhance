@@ -9,6 +9,20 @@ export function pickString(...values: unknown[]): string {
 }
 
 /**
+ * 安全解析正数配置值，无效时返回默认值
+ */
+export function num(value: unknown, fallback: number): number {
+  return typeof value === "number" && value > 0 ? value : fallback;
+}
+
+/**
+ * 安全解析正数配置值，无效时返回 undefined
+ */
+export function numOpt(value: unknown): number | undefined {
+  return typeof value === "number" && value > 0 ? value : undefined;
+}
+
+/**
  * 延迟指定毫秒数
  */
 export function sleep(ms: number): Promise<void> {

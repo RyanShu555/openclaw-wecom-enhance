@@ -1,6 +1,7 @@
 import type { ClawdbotConfig } from "openclaw/plugin-sdk";
 
 import type { WecomAccountConfig } from "./types.js";
+import { num, numOpt } from "./shared/string-utils.js";
 
 export type VisionConfig = {
   enabled?: boolean;
@@ -64,9 +65,9 @@ export function resolveVisionConfig(accountConfig: WecomAccountConfig, coreConfi
     model: vision.model || process.env.OPENAI_MODEL || inherited.model || "gpt-4o-mini",
     prompt: vision.prompt
       || "请描述图片内容并尽量提取可见文字。输出简洁中文要点。",
-    maxTokens: typeof vision.maxTokens === "number" ? vision.maxTokens : 400,
-    timeoutMs: typeof vision.timeoutMs === "number" ? vision.timeoutMs : 15000,
-    maxBytes: typeof vision.maxBytes === "number" ? vision.maxBytes : undefined,
+    maxTokens: num(vision.maxTokens, 400),
+    timeoutMs: num(vision.timeoutMs, 15000),
+    maxBytes: numOpt(vision.maxBytes),
   };
 }
 

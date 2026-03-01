@@ -5,7 +5,7 @@ import { extname, join } from "node:path";
 
 import type { WecomAccountConfig } from "./types.js";
 import { describeImageWithVision, resolveVisionConfig } from "./media-vision.js";
-import { truncateText } from "./shared/string-utils.js";
+import { num, numOpt, truncateText } from "./shared/string-utils.js";
 
 const DEFAULT_TEXT_EXTENSIONS = ["txt", "md", "log", "csv", "json", "xml", "yaml", "yml"];
 
@@ -70,46 +70,36 @@ export function resolveAutoAudioConfig(cfg: WecomAccountConfig): ResolvedAutoAud
     apiKey,
     model,
     prompt: audio.prompt?.trim() || undefined,
-    timeoutMs: typeof audio.timeoutMs === "number" && audio.timeoutMs > 0 ? audio.timeoutMs : 15000,
-    maxBytes: typeof audio.maxBytes === "number" && audio.maxBytes > 0 ? audio.maxBytes : undefined,
+    timeoutMs: num(audio.timeoutMs, 15000),
+    maxBytes: numOpt(audio.maxBytes),
   };
 }
 
 export function resolveAutoFileConfig(cfg: WecomAccountConfig): ResolvedAutoFileConfig | null {
   const fileCfg = cfg.media?.auto?.file;
   if (!cfg.media?.auto?.enabled || !fileCfg?.enabled) return null;
-  const textMaxBytes = typeof fileCfg.textMaxBytes === "number" && fileCfg.textMaxBytes > 0
-    ? fileCfg.textMaxBytes
-    : 200_000;
-  const textMaxChars = typeof fileCfg.textMaxChars === "number" && fileCfg.textMaxChars > 0
-    ? fileCfg.textMaxChars
-    : 4000;
   const extensions = (fileCfg.extensions && fileCfg.extensions.length > 0
     ? fileCfg.extensions
     : DEFAULT_TEXT_EXTENSIONS).map((ext) => ext.toLowerCase());
-  return { textMaxBytes, textMaxChars, extensions };
+  return {
+    textMaxBytes: num(fileCfg.textMaxBytes, 200_000),
+    textMaxChars: num(fileCfg.textMaxChars, 4000),
+    extensions,
+  };
 }
 
 export function resolveAutoVideoConfig(cfg: WecomAccountConfig): ResolvedAutoVideoConfig | null {
   const video = cfg.media?.auto?.video;
   if (!cfg.media?.auto?.enabled || !video?.enabled) return null;
   const mode = video.mode === "full" ? "full" : "light";
-  const maxDurationSec = typeof video.maxDurationSec === "number" && video.maxDurationSec > 0
-    ? video.maxDurationSec
-    : mode === "full" ? 120 : 60;
-  const frames = typeof video.frames === "number" && video.frames > 0
-    ? video.frames
-    : mode === "full" ? 12 : 5;
-  const intervalSec = typeof video.intervalSec === "number" && video.intervalSec > 0
-    ? video.intervalSec
-    : Math.max(1, Math.round(maxDurationSec / Math.max(frames, 1)));
-  const maxFrames = typeof video.maxFrames === "number" && video.maxFrames > 0
-    ? video.maxFrames
-    : mode === "full" ? 30 : frames;
+  const maxDurationSec = num(video.maxDurationSec, mode === "full" ? 120 : 60);
+  const frames = num(video.frames, mode === "full" ? 12 : 5);
+  const intervalSec = num(video.intervalSec, Math.max(1, Math.round(maxDurationSec / Math.max(frames, 1))));
+  const maxFrames = num(video.maxFrames, mode === "full" ? 30 : frames);
   const includeAudio = video.includeAudio === true;
   return {
     ffmpegPath: video.ffmpegPath?.trim() || "ffmpeg",
-    maxBytes: typeof video.maxBytes === "number" && video.maxBytes > 0 ? video.maxBytes : undefined,
+    maxBytes: numOpt(video.maxBytes),
     mode,
     frames,
     intervalSec,
@@ -187,37 +177,6 @@ export async function transcribeAudioWithOpenAI(params: {
 }
 
 const FFMPEG_TIMEOUT_MS = 60_000;
-
-async function runFfmpegExtractFrame(params: {
-  ffmpegPath: string;
-  videoPath: string;
-  framePath: string;
-}): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const proc = spawn(params.ffmpegPath, [
-      "-y",
-      "-i",
-      params.videoPath,
-      "-frames:v",
-      "1",
-      "-q:v",
-      "2",
-      params.framePath,
-    ]);
-    proc.stdout?.resume();
-    proc.stderr?.resume();
-    const timer = setTimeout(() => {
-      proc.kill("SIGKILL");
-      reject(new Error("ffmpeg timed out"));
-    }, FFMPEG_TIMEOUT_MS);
-    proc.on("error", (err) => { clearTimeout(timer); reject(err); });
-    proc.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve();
-      else reject(new Error(`ffmpeg exited with code ${code ?? "unknown"}`));
-    });
-  });
-}
 
 async function runFfmpegExtractFrames(params: {
   ffmpegPath: string;

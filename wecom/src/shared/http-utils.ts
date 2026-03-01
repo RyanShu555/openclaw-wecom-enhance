@@ -1,36 +1,12 @@
 import type { IncomingMessage } from "node:http";
 
 /**
- * 安全解码 URI 组件，解码失败时返回原值
- */
-export function safeDecodeURIComponent(value: string): string {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
-/**
  * 从请求中解析查询参数
  */
 export function resolveQueryParams(req: IncomingMessage): URLSearchParams {
   const rawUrl = req.url ?? "";
-  const queryIndex = rawUrl.indexOf("?");
-  if (queryIndex < 0) return new URLSearchParams();
-  const queryString = rawUrl.slice(queryIndex + 1);
-  const params = new URLSearchParams();
-  if (!queryString) return params;
-  for (const part of queryString.split("&")) {
-    if (!part) continue;
-    const eqIndex = part.indexOf("=");
-    const keyRaw = eqIndex >= 0 ? part.slice(0, eqIndex) : part;
-    const valueRaw = eqIndex >= 0 ? part.slice(eqIndex + 1) : "";
-    const key = safeDecodeURIComponent(keyRaw);
-    const value = safeDecodeURIComponent(valueRaw);
-    params.append(key, value);
-  }
-  return params;
+  const idx = rawUrl.indexOf("?");
+  return idx < 0 ? new URLSearchParams() : new URLSearchParams(rawUrl.slice(idx + 1));
 }
 
 /**
@@ -88,47 +64,6 @@ export async function readRequestBody(req: IncomingMessage, maxSize: number): Pr
       if (done) return;
       done = true;
       reject(err);
-    });
-  });
-}
-
-/**
- * 读取 JSON 请求体
- */
-export async function readJsonBody(req: IncomingMessage, maxBytes: number): Promise<{ ok: boolean; value?: unknown; error?: string }> {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  let done = false;
-  return await new Promise((resolve) => {
-    req.on("data", (chunk: Buffer) => {
-      if (done) return;
-      total += chunk.length;
-      if (total > maxBytes) {
-        done = true;
-        resolve({ ok: false, error: "payload too large" });
-        req.destroy();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on("end", () => {
-      if (done) return;
-      done = true;
-      try {
-        const raw = Buffer.concat(chunks).toString("utf8");
-        if (!raw.trim()) {
-          resolve({ ok: false, error: "empty payload" });
-          return;
-        }
-        resolve({ ok: true, value: JSON.parse(raw) as unknown });
-      } catch (err) {
-        resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
-      }
-    });
-    req.on("error", (err) => {
-      if (done) return;
-      done = true;
-      resolve({ ok: false, error: err instanceof Error ? err.message : String(err) });
     });
   });
 }
