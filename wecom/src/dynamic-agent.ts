@@ -13,6 +13,7 @@ import type { WecomAccountConfig } from "./types.js";
 export type DynamicAgentConfig = NonNullable<WecomAccountConfig["dynamicAgents"]>;
 
 const registeredAgents = new Set<string>();
+const REGISTERED_AGENTS_MAX = 5000;
 const pendingWrites = new Map<string, Promise<void>>();
 
 export function shouldUseDynamicAgent(params: {
@@ -74,6 +75,13 @@ export async function ensureDynamicAgentListed(params: {
         channel: "wecom",
       });
       registeredAgents.add(agentId);
+      // 防止缓存无限增长
+      if (registeredAgents.size > REGISTERED_AGENTS_MAX) {
+        const iter = registeredAgents.values();
+        for (let i = 0; i < registeredAgents.size - REGISTERED_AGENTS_MAX; i++) {
+          registeredAgents.delete(iter.next().value!);
+        }
+      }
     } catch {
       // 注册失败不阻塞消息处理
     } finally {

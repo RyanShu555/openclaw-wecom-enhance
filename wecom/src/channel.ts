@@ -227,7 +227,7 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
           };
         }
         const { uploadWecomMedia, sendWecomMedia, sendWecomText } = await import("./wecom-api.js");
-        const fs = await import("fs");
+        const { readFile } = await import("node:fs/promises");
         const path = await import("path");
 
         const lower = target.toLowerCase();
@@ -240,10 +240,10 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
         let filename: string;
         if (mediaUrl.startsWith("file://")) {
           const filePath = mediaUrl.slice(7);
-          buffer = fs.readFileSync(filePath);
+          buffer = Buffer.from(await readFile(filePath));
           filename = path.basename(filePath);
         } else if (mediaUrl.startsWith("/") || /^[a-zA-Z]:/.test(mediaUrl)) {
-          buffer = fs.readFileSync(mediaUrl);
+          buffer = Buffer.from(await readFile(mediaUrl));
           filename = path.basename(mediaUrl);
         } else {
           const res = await fetch(mediaUrl);

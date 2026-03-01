@@ -42,9 +42,13 @@ export type WecomAccountConfig = {
   callbackAesKey?: string;
   pushToken?: string;
 
+  // 工作目录（用于文件搜索）
+  workspace?: string;
+
   // Media handling
   media?: {
     tempDir?: string;
+    searchPaths?: string[];
     retentionHours?: number;
     cleanupOnStart?: boolean;
     maxBytes?: number;

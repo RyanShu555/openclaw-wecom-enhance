@@ -84,7 +84,7 @@ export class ConversationQueue<T = unknown> {
     // 创建新的排队批次
     const seq = state.nextSeq++;
     const batchKey = `${conversationKey}#q${seq}`;
-    state.queue = [batchKey];
+    state.queue.push(batchKey);
     const batch: PendingBatch<T> = {
       conversationKey, batchKey, contents: [content], meta,
       createdAt: Date.now(), timeout: null, readyToFlush: false,

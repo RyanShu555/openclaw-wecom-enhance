@@ -1,4 +1,4 @@
-import { basename, extname } from "node:path";
+import { basename, extname, resolve as resolvePath } from "node:path";
 import { readFile } from "node:fs/promises";
 
 import { pickString } from "./string-utils.js";
@@ -105,10 +105,19 @@ export function resolveMediaTypeFromContentType(contentType: string): MediaType 
 }
 
 /**
- * 移除 file:// 协议前缀
+ * 移除 file:// 协议前缀并验证路径安全性
  */
 export function stripFileProtocol(rawPath: string): string {
-  return rawPath.startsWith("file://") ? rawPath.replace(/^file:\/\//, "") : rawPath;
+  const stripped = rawPath.startsWith("file://") ? rawPath.replace(/^file:\/\//, "") : rawPath;
+  const resolved = resolvePath(stripped);
+  // 阻止路径遍历到敏感系统目录
+  const blocked = ["/etc", "/proc", "/sys", "/dev", "/var/run"];
+  for (const prefix of blocked) {
+    if (resolved === prefix || resolved.startsWith(prefix + "/")) {
+      throw new Error(`Access denied: path ${resolved} is in a restricted directory`);
+    }
+  }
+  return resolved;
 }
 
 /**

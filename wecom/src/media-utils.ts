@@ -1,10 +1,12 @@
 import { readdir, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import type { WecomWebhookTarget } from "./monitor.js";
 
-const cleanupExecuted = new Set<string>();
+const cleanupExecuted = new Map<string, number>();
+const CLEANUP_CACHE_MAX = 200;
+const CLEANUP_CACHE_TTL_MS = 24 * 3600 * 1000;
 
 export function resolveExtFromContentType(contentType: string, fallback: string): string {
   if (!contentType) return fallback;
@@ -25,8 +27,17 @@ export async function cleanupMediaDir(
 ): Promise<void> {
   if (cleanupOnStart === false) return;
   if (!retentionHours || retentionHours <= 0) return;
-  if (cleanupExecuted.has(dir)) return;
-  cleanupExecuted.add(dir);
+  const now = Date.now();
+  const lastRun = cleanupExecuted.get(dir);
+  if (lastRun && now - lastRun < CLEANUP_CACHE_TTL_MS) return;
+  cleanupExecuted.set(dir, now);
+  // 防止缓存无限增长
+  if (cleanupExecuted.size > CLEANUP_CACHE_MAX) {
+    const oldest = Array.from(cleanupExecuted.entries()).sort((a, b) => a[1] - b[1]);
+    for (let i = 0; i < oldest.length - CLEANUP_CACHE_MAX; i++) {
+      cleanupExecuted.delete(oldest[i]![0]);
+    }
+  }
   const cutoff = Date.now() - retentionHours * 3600 * 1000;
   try {
     const entries = await readdir(dir);
@@ -47,8 +58,17 @@ export async function cleanupMediaDir(
 }
 
 export function resolveMediaTempDir(target: WecomWebhookTarget): string {
-  return target.account.config.media?.tempDir?.trim()
-    || join(tmpdir(), "openclaw-wecom");
+  const raw = target.account.config.media?.tempDir?.trim();
+  if (!raw) return join(tmpdir(), "openclaw-wecom");
+  const resolved = resolve(raw);
+  // 阻止配置指向敏感系统目录
+  const blocked = ["/etc", "/proc", "/sys", "/dev", "/var/run"];
+  for (const prefix of blocked) {
+    if (resolved === prefix || resolved.startsWith(prefix + "/")) {
+      return join(tmpdir(), "openclaw-wecom");
+    }
+  }
+  return resolved;
 }
 
 export function resolveMediaMaxBytes(target: WecomWebhookTarget): number | undefined {
@@ -64,6 +84,10 @@ export function resolveMediaRetentionMs(target: WecomWebhookTarget): number | un
 export function sanitizeFilename(name: string, fallback: string): string {
   const base = name.split(/[/\\\\]/).pop() ?? "";
   const trimmed = base.trim();
+  // 阻止 .. 路径遍历
+  if (trimmed === ".." || trimmed === "." || trimmed.includes("..")) {
+    return fallback;
+  }
   const safe = trimmed
     .replace(/[^\w.\-() ]+/g, "_")
     .replace(/\s+/g, " ")

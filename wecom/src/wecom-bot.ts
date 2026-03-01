@@ -36,6 +36,8 @@ import {
 } from "./shared/media-shared.js";
 import {
   buildMediaCacheKey,
+  getCachedMedia as getCachedMediaShared,
+  storeCachedMedia as storeCachedMediaShared,
   type MediaCacheEntry,
   MEDIA_CACHE_MAX_ENTRIES,
 } from "./shared/cache-utils.js";
@@ -114,7 +116,8 @@ async function flushBotBatch(batch: PendingBatch<BotBatchMeta>): Promise<void> {
     let core: PluginRuntime | null = null;
     try { core = getWecomRuntime(); } catch { /* runtime not ready */ }
     if (core) {
-      streams.get(streamId)!.started = true;
+      const streamState = streams.get(streamId);
+      if (streamState) streamState.started = true;
       const enrichedTarget: WecomWebhookTarget = { ...target, core };
       await startAgentForStream({ target: enrichedTarget, accountId: target.account.accountId, msg: mergedMsg, streamId });
     } else {
@@ -174,7 +177,6 @@ function buildFallbackPrompt(params: {
   return "交付出现异常，已尝试通过应用私信发送给你。";
 }
 
-import { getCachedMedia as getCachedMediaShared, storeCachedMedia as storeCachedMediaShared } from "./shared/cache-utils.js";
 
 async function getBotCachedMedia(key: string | null, retentionMs?: number): Promise<MediaCacheEntry | null> {
   return getCachedMediaShared(mediaCache, key, retentionMs);
@@ -1137,7 +1139,8 @@ export async function handleWecomBotWebhook(params: {
       let core: PluginRuntime | null = null;
       try { core = getWecomRuntime(); } catch { /* runtime not ready */ }
       if (core) {
-        streams.get(streamId)!.started = true;
+        const streamState = streams.get(streamId);
+        if (streamState) streamState.started = true;
         const enrichedTarget: WecomWebhookTarget = { ...target, core };
         startAgentForStream({ target: enrichedTarget, accountId: target.account.accountId, msg, streamId }).catch((err) => {
           const state = streams.get(streamId);
