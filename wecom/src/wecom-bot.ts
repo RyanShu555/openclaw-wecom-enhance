@@ -1122,41 +1122,36 @@ export async function handleWecomBotWebhook(params: {
   const debounceMs = typeof target.account.config.debounceMs === "number"
     ? target.account.config.debounceMs : DEFAULT_DEBOUNCE_MS;
 
-  // 将消息加入防抖队列
-  const { status } = botQueue.add({
-    conversationKey,
-    content: inboundText,
-    meta: { target, msg, streamId, nonce, timestamp },
-  });
-
-  logVerbose(target, `bot queue status=${status} conversationKey=${conversationKey}`);
-
-  // 非文本消息或首条消息直接处理（不防抖）
-  if (msgtype !== "text" || status === "active_new") {
-    // active_new 的消息会在防抖超时后自动 flush
-    // 非文本消息需要立即处理（媒体不适合聚合）
-    if (msgtype !== "text") {
-      let core: PluginRuntime | null = null;
-      try { core = getWecomRuntime(); } catch { /* runtime not ready */ }
-      if (core) {
-        const streamState = streams.get(streamId);
-        if (streamState) streamState.started = true;
-        const enrichedTarget: WecomWebhookTarget = { ...target, core };
-        startAgentForStream({ target: enrichedTarget, accountId: target.account.accountId, msg, streamId }).catch((err) => {
-          const state = streams.get(streamId);
-          if (state) {
-            state.error = err instanceof Error ? err.message : String(err);
-            state.content = state.content || `Error: ${state.error}`;
-            state.finished = true;
-            state.updatedAt = Date.now();
-          }
-          target.runtime.error?.(`[${target.account.accountId}] wecom agent failed: ${String(err)}`);
-        });
-      } else {
+  // 非文本消息（媒体）不适合聚合，跳过队列直接处理
+  if (msgtype !== "text") {
+    let core: PluginRuntime | null = null;
+    try { core = getWecomRuntime(); } catch { /* runtime not ready */ }
+    if (core) {
+      const streamState = streams.get(streamId);
+      if (streamState) streamState.started = true;
+      const enrichedTarget: WecomWebhookTarget = { ...target, core };
+      startAgentForStream({ target: enrichedTarget, accountId: target.account.accountId, msg, streamId }).catch((err) => {
         const state = streams.get(streamId);
-        if (state) { state.finished = true; state.updatedAt = Date.now(); }
-      }
+        if (state) {
+          state.error = err instanceof Error ? err.message : String(err);
+          state.content = state.content || `Error: ${state.error}`;
+          state.finished = true;
+          state.updatedAt = Date.now();
+        }
+        target.runtime.error?.(`[${target.account.accountId}] wecom agent failed: ${String(err)}`);
+      });
+    } else {
+      const state = streams.get(streamId);
+      if (state) { state.finished = true; state.updatedAt = Date.now(); }
     }
+  } else {
+    // 文本消息加入防抖队列
+    const { status } = botQueue.add({
+      conversationKey,
+      content: inboundText,
+      meta: { target, msg, streamId, nonce, timestamp },
+    });
+    logVerbose(target, `bot queue status=${status} conversationKey=${conversationKey}`);
   }
 
   await waitForStreamContent(streamId, 800);

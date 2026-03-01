@@ -46,6 +46,7 @@ async function zipDirectory(sourceDir: string): Promise<{ zipPath: string; clean
     const output = createWriteStream(zipPath);
     const archive = archiver("zip", { zlib: { level: 9 } });
     output.on("close", () => resolve());
+    output.on("error", (err) => reject(err));
     archive.on("error", (err) => reject(err));
     archive.pipe(output);
     archive.directory(sourceDir, false);

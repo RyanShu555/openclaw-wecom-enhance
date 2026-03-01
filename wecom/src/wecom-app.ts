@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import crypto from "node:crypto";
 import { XMLParser } from "fast-xml-parser";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -75,8 +76,8 @@ const PENDING_TTL_MS = 10 * 60 * 1000;
 const MAX_LIST_PREVIEW = 30;
 const LIST_MORE_PATTERN = /(更多|下一页|下页|继续|下一批|more|next)/i;
 
-function pendingKey(fromUser: string, chatId?: string): string {
-  return chatId ? `${fromUser}::${chatId}` : fromUser;
+function pendingKey(accountId: string, fromUser: string, chatId?: string): string {
+  return chatId ? `${accountId}::${fromUser}::${chatId}` : `${accountId}::${fromUser}`;
 }
 
 function prunePendingLists(): void {
@@ -306,7 +307,7 @@ async function tryHandleNaturalFileSend(params: {
   const { target, text, fromUser, chatId, isGroup } = params;
   if (!text || text.trim().startsWith("/")) return false;
   prunePendingLists();
-  const key = pendingKey(fromUser, chatId);
+  const key = pendingKey(target.account.accountId, fromUser, chatId);
   const pending = pendingSendLists.get(key);
   if (pending) {
     if (LIST_MORE_PATTERN.test(text)) {
@@ -833,7 +834,15 @@ export async function handleWecomPushRequest(params: {
     url.searchParams.get("token"),
     resolveHeaderToken(req),
   );
-  if (expectedToken !== requestToken) {
+  // 使用时序安全比较，防止 timing attack
+  const tokenMatch = (() => {
+    if (!expectedToken || !requestToken) return false;
+    const a = Buffer.from(expectedToken, "utf8");
+    const b = Buffer.from(requestToken, "utf8");
+    if (a.length !== b.length) return false;
+    return crypto.timingSafeEqual(a, b);
+  })();
+  if (!tokenMatch) {
     res.statusCode = 403;
     res.setHeader("Content-Type", "application/json; charset=utf-8");
     res.end(JSON.stringify({ ok: false, error: "Invalid push token" }));
@@ -856,15 +865,17 @@ export async function handleWecomPushRequest(params: {
     return true;
   }
 
+  const MAX_DELAY_MS = 60_000;
   const messages = Array.isArray(payload?.messages) && payload?.messages.length > 0
     ? payload.messages
     : [payload ?? {}];
-  const intervalMs = typeof payload?.intervalMs === "number" && payload.intervalMs > 0 ? payload.intervalMs : 0;
+  const intervalMs = typeof payload?.intervalMs === "number" && payload.intervalMs > 0
+    ? Math.min(payload.intervalMs, MAX_DELAY_MS) : 0;
   let sent = 0;
 
   for (const message of messages) {
     if (message.delayMs && message.delayMs > 0) {
-      await sleep(message.delayMs);
+      await sleep(Math.min(message.delayMs, MAX_DELAY_MS));
     }
     try {
       const result = await dispatchOutboundMedia({

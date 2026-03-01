@@ -124,7 +124,7 @@ export function stripFileProtocol(rawPath: string): string {
  * 解析 Base64 输入（支持 data URI）
  */
 export function parseBase64Input(input: string): { data: string; mimeType?: string } {
-  const match = input.match(/^data:([^;]+);base64,(.*)$/i);
+  const match = input.match(/^data:([^;]+);base64,([\s\S]*)$/i);
   if (match) {
     return { data: match[2]!, mimeType: match[1] };
   }

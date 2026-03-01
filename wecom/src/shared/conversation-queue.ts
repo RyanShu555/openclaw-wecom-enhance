@@ -123,6 +123,8 @@ export class ConversationQueue<T = unknown> {
     }
     for (const [convKey, conv] of this.conversations.entries()) {
       const hasActive = this.pending.has(conv.activeBatchKey);
+      // 清理队列中已被 prune 的孤立 batchKey
+      conv.queue = conv.queue.filter((qk) => this.pending.has(qk));
       if (!hasActive && conv.queue.length === 0) {
         this.conversations.delete(convKey);
       }

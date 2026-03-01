@@ -10,13 +10,25 @@ const CLEANUP_CACHE_TTL_MS = 24 * 3600 * 1000;
 
 export function resolveExtFromContentType(contentType: string, fallback: string): string {
   if (!contentType) return fallback;
-  if (contentType.includes("png")) return "png";
-  if (contentType.includes("gif")) return "gif";
-  if (contentType.includes("jpeg") || contentType.includes("jpg")) return "jpg";
-  if (contentType.includes("mp4")) return "mp4";
-  if (contentType.includes("amr")) return "amr";
-  if (contentType.includes("wav")) return "wav";
-  if (contentType.includes("mp3")) return "mp3";
+  const ct = contentType.toLowerCase();
+  const mapping: Record<string, string> = {
+    "image/png": "png",
+    "image/gif": "gif",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "image/bmp": "bmp",
+    "audio/amr": "amr",
+    "audio/wav": "wav",
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/mp4": "m4a",
+    "audio/m4a": "m4a",
+    "video/mp4": "mp4",
+    "video/quicktime": "mov",
+  };
+  // 精确匹配（去掉参数部分如 charset）
+  const base = ct.split(";")[0]!.trim();
+  if (mapping[base]) return mapping[base];
   return fallback;
 }
 
@@ -89,7 +101,7 @@ export function sanitizeFilename(name: string, fallback: string): string {
     return fallback;
   }
   const safe = trimmed
-    .replace(/[^\w.\-() ]+/g, "_")
+    .replace(/[^\w.\-() \u4e00-\u9fff\u3400-\u4dbf\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]+/g, "_")
     .replace(/\s+/g, " ")
     .trim();
   const finalName = safe.slice(0, 120);

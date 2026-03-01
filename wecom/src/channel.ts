@@ -229,6 +229,7 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
         const { uploadWecomMedia, sendWecomMedia, sendWecomText } = await import("./wecom-api.js");
         const { readFile } = await import("node:fs/promises");
         const path = await import("path");
+        const { stripFileProtocol } = await import("./shared/media-shared.js");
 
         const lower = target.toLowerCase();
         const chatPrefixes = ["chat:", "chatid:", "group:"];
@@ -238,21 +239,24 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
 
         let buffer: Buffer;
         let filename: string;
-        if (mediaUrl.startsWith("file://")) {
-          const filePath = mediaUrl.slice(7);
+        if (mediaUrl.startsWith("file://") || mediaUrl.startsWith("/") || /^[a-zA-Z]:/.test(mediaUrl)) {
+          const filePath = stripFileProtocol(mediaUrl);
           buffer = Buffer.from(await readFile(filePath));
           filename = path.basename(filePath);
-        } else if (mediaUrl.startsWith("/") || /^[a-zA-Z]:/.test(mediaUrl)) {
-          buffer = Buffer.from(await readFile(mediaUrl));
-          filename = path.basename(mediaUrl);
         } else {
-          const res = await fetch(mediaUrl);
-          if (!res.ok) {
-            throw new Error(`Failed to fetch media: ${res.status} ${res.statusText}`);
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 30000);
+          try {
+            const res = await fetch(mediaUrl, { signal: controller.signal });
+            if (!res.ok) {
+              throw new Error(`Failed to fetch media: ${res.status} ${res.statusText}`);
+            }
+            buffer = Buffer.from(await res.arrayBuffer());
+            const urlPath = new URL(mediaUrl).pathname;
+            filename = path.basename(urlPath) || "media";
+          } finally {
+            clearTimeout(timer);
           }
-          buffer = Buffer.from(await res.arrayBuffer());
-          const urlPath = new URL(mediaUrl).pathname;
-          filename = path.basename(urlPath) || "media";
         }
 
         const ext = path.extname(filename).toLowerCase();

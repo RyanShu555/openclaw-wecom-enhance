@@ -173,6 +173,7 @@ export async function transcribeAudioWithOpenAI(params: {
       signal: controller.signal,
     });
     if (!res.ok) {
+      await res.text().catch(() => {});
       return null;
     }
     const json = await res.json();
@@ -203,6 +204,8 @@ async function runFfmpegExtractFrame(params: {
       "2",
       params.framePath,
     ]);
+    proc.stdout?.resume();
+    proc.stderr?.resume();
     const timer = setTimeout(() => {
       proc.kill("SIGKILL");
       reject(new Error("ffmpeg timed out"));
@@ -236,6 +239,8 @@ async function runFfmpegExtractFrames(params: {
       "2",
       params.outputPattern,
     ]);
+    proc.stdout?.resume();
+    proc.stderr?.resume();
     const timer = setTimeout(() => {
       proc.kill("SIGKILL");
       reject(new Error("ffmpeg timed out"));

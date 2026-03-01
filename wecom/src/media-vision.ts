@@ -112,6 +112,7 @@ export async function describeImageWithVision(params: {
       });
 
       if (!res.ok) {
+        await res.text().catch(() => {});
         continue;
       }
       const data = await res.json() as any;
