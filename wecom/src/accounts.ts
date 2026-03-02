@@ -20,7 +20,9 @@ function resolveAccountEnv(cfg: ClawdbotConfig, accountId: string, key: string):
 function listConfiguredAccountIds(cfg: ClawdbotConfig): string[] {
   const accounts = (cfg.channels?.wecom as WecomConfig | undefined)?.accounts;
   if (!accounts || typeof accounts !== "object") return [];
-  return Object.keys(accounts).filter(Boolean);
+  return Object.keys(accounts).filter(
+    (k) => k && k !== "default" && typeof accounts[k] === "object" && accounts[k] !== null,
+  );
 }
 
 export function listWecomAccountIds(cfg: ClawdbotConfig): string[] {
@@ -31,6 +33,9 @@ export function listWecomAccountIds(cfg: ClawdbotConfig): string[] {
 
 export function resolveDefaultWecomAccountId(cfg: ClawdbotConfig): string {
   const wecomConfig = cfg.channels?.wecom as WecomConfig | undefined;
+  // 优先读 accounts.default（OpenClaw 推荐写法），再回退 defaultAccount
+  const accountsDefault = (wecomConfig?.accounts as Record<string, unknown> | undefined)?.default;
+  if (typeof accountsDefault === "string" && accountsDefault.trim()) return accountsDefault.trim();
   if (wecomConfig?.defaultAccount?.trim()) return wecomConfig.defaultAccount.trim();
   const ids = listWecomAccountIds(cfg);
   if (ids.includes(DEFAULT_ACCOUNT_ID)) return DEFAULT_ACCOUNT_ID;
@@ -40,7 +45,9 @@ export function resolveDefaultWecomAccountId(cfg: ClawdbotConfig): string {
 function resolveAccountConfig(cfg: ClawdbotConfig, accountId: string): WecomAccountConfig | undefined {
   const accounts = (cfg.channels?.wecom as WecomConfig | undefined)?.accounts;
   if (!accounts || typeof accounts !== "object") return undefined;
-  return accounts[accountId] as WecomAccountConfig | undefined;
+  const entry = accounts[accountId];
+  if (!entry || typeof entry !== "object") return undefined;
+  return entry as WecomAccountConfig;
 }
 
 function mergeWecomAccountConfig(cfg: ClawdbotConfig, accountId: string): WecomAccountConfig {

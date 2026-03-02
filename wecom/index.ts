@@ -7,6 +7,7 @@ import { emptyPluginConfigSchema } from "openclaw/plugin-sdk";
 import { handleWecomWebhookRequest } from "./src/monitor.js";
 import { setWecomRuntime } from "./src/runtime.js";
 import { wecomPlugin } from "./src/channel.js";
+import { checkForUpdates } from "./src/version-check.js";
 
 const plugin = {
   id: "openclaw-wecom",
@@ -17,6 +18,7 @@ const plugin = {
     setWecomRuntime(api.runtime);
     api.registerChannel({ plugin: wecomPlugin });
     api.registerHttpHandler(handleWecomWebhookRequest);
+    checkForUpdates(api.runtime);
   },
 };
 

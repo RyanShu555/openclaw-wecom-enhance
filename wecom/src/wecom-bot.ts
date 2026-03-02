@@ -355,7 +355,7 @@ async function startAgentForStream(params: {
         const canBridgeMedia = account.config.botMediaBridge !== false
           && Boolean(account.corpId && account.corpSecret && account.agentId);
         const toChatId = chatType === "group" ? chatId : undefined;
-        const current = streams.get(streamId);
+        let current = streams.get(streamId);
         if (!current) return;
 
         // ── 超时降级检测 ──
@@ -406,7 +406,7 @@ async function startAgentForStream(params: {
               maxBytes: resolveMediaMaxBytes(target),
             });
             if (result.sent) {
-              const current = streams.get(streamId);
+              current = streams.get(streamId);
               if (current) {
                 const note = result.label ?? "[已发送媒体]";
                 const nextText = current.content ? `${current.content}\n\n${note}` : note;
@@ -421,7 +421,7 @@ async function startAgentForStream(params: {
         }
 
         let text = payload.text ?? "";
-        const current = streams.get(streamId);
+        current = streams.get(streamId);
         if (!current) return;
 
         const trimmedText = text.trim();

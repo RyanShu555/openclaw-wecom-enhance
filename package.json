@@ -5,6 +5,10 @@
   "description": "OpenClaw WeCom channel plugin (intelligent bot + internal app)",
   "author": "OpenClaw",
   "main": "wecom/index.ts",
+  "scripts": {
+    "postinstall": "node scripts/postinstall.mjs",
+    "upgrade": "node scripts/upgrade.mjs"
+  },
   "openclaw": {
     "extensions": [
       "./wecom/index.ts"
@@ -55,6 +59,7 @@
   "license": "MIT",
   "files": [
     "wecom/**",
+    "scripts/**",
     "docs/TESTING.md",
     "docs/wecom.config.example.json",
     "docs/wecom.config.full.example.jsonc",
