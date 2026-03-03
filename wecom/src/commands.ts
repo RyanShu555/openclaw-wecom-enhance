@@ -2,11 +2,11 @@ import type { ClawdbotConfig } from "openclaw/plugin-sdk";
 import { createWriteStream } from "node:fs";
 import { mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve as resolvePath } from "node:path";
 import archiver from "archiver";
 
 import { getWecomRuntime } from "./runtime.js";
-import { listWecomAccountIds } from "./accounts.js";
+import { listWecomAccountIds } from "./config/index.js";
 import { sendWecomFile, sendWecomText, uploadWecomMedia } from "./wecom-api.js";
 import { sleep, appendOperationLog, resolveSendIntervalMs } from "./shared/index.js";
 import type { ResolvedWecomAccount } from "./types.js";
@@ -62,7 +62,28 @@ async function zipDirectory(sourceDir: string): Promise<{ zipPath: string; clean
 
 const SENDFILE_BLOCKED_PATHS = ["/etc", "/proc", "/sys", "/dev", "/var/run", "/root/.ssh", "/root/.gnupg"];
 
-function resolveSafeDirs(ctx: CommandContext): string[] {
+function normalizeComparablePath(input: string): string {
+  let normalized = input.replace(/\\/g, "/");
+  if (normalized.length > 1) normalized = normalized.replace(/\/+$/, "");
+  if (process.platform === "win32") normalized = normalized.toLowerCase();
+  return normalized;
+}
+
+function isPathWithin(candidate: string, baseDir: string): boolean {
+  const rel = relative(baseDir, candidate);
+  if (!rel) return true;
+  return !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+async function resolveComparablePath(input: string): Promise<string> {
+  try {
+    return normalizeComparablePath(await realpath(input));
+  } catch {
+    return normalizeComparablePath(resolvePath(input));
+  }
+}
+
+async function resolveSafeDirs(ctx: CommandContext): Promise<string[]> {
   const home = homedir();
   const defaults = [
     join(home, "Desktop"),
@@ -82,19 +103,21 @@ function resolveSafeDirs(ctx: CommandContext): string[] {
   if (typeof tempDir === "string" && tempDir.trim()) {
     defaults.push(tempDir.trim());
   }
-  return defaults;
+  const resolved = await Promise.all(defaults.map((p) => resolveComparablePath(p.trim().replace(/^~/, home))));
+  return Array.from(new Set(resolved));
 }
 
 async function isPathAllowed(filePath: string, safeDirs: string[]): Promise<boolean> {
   try {
-    const resolved = await realpath(filePath);
+    const resolved = await resolveComparablePath(filePath);
     // Block known sensitive paths
     for (const blocked of SENDFILE_BLOCKED_PATHS) {
-      if (resolved === blocked || resolved.startsWith(blocked + "/")) return false;
+      const blockedPath = normalizeComparablePath(blocked);
+      if (resolved === blockedPath || resolved.startsWith(blockedPath + "/")) return false;
     }
     // If safe dirs are configured, restrict to them
     if (safeDirs.length > 0) {
-      return safeDirs.some((dir) => resolved === dir || resolved.startsWith(dir + "/"));
+      return safeDirs.some((dir) => isPathWithin(resolved, dir));
     }
     return true;
   } catch {
@@ -108,10 +131,10 @@ async function sendFiles(ctx: CommandContext, paths: string[]): Promise<{ sent: 
   const maxBytes = ctx.account.config.media?.maxBytes;
   const intervalMs = resolveSendIntervalMs(ctx.account.config);
   const logPath = ctx.account.config.operations?.logPath;
-  const safeDirs = resolveSafeDirs(ctx);
+  const safeDirs = await resolveSafeDirs(ctx);
   for (const rawPath of paths) {
     const path = rawPath.startsWith("file://") ? rawPath.replace(/^file:\/\//, "") : rawPath;
-    if (!path.startsWith("/")) {
+    if (!isAbsolute(path)) {
       skipped += 1;
       await sendAndRecord(ctx, `⚠️ 路径需为绝对路径：${rawPath}`);
       continue;

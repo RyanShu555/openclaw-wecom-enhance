@@ -3,13 +3,16 @@ refs/
 
 # Node
 node_modules/
+*.tgz
 
 # Logs
 npm-debug.log*
 
 # OS
 .DS_Store
-docs/TECHNICAL.md
 
 # Local AI assistant settings (do not commit)
 .claude/
+
+# Local temporary snapshots
+.tmp-*/

@@ -13,6 +13,38 @@ OpenClaw WeCom 插件，支持 **智能机器人 API 模式** 与 **自建应用
 - 群聊：自动识别 `chatId` 并使用 `appchat/send`
 - 进阶：文件夹打包发送、发送队列、操作日志、多媒体自动识别
 
+## 重构后模块结构（维护入口）
+
+### App 模式
+
+| 职责 | 入口/模块 |
+|------|-----------|
+| Webhook 主流程编排 | `wecom/src/app/webhook-handler.ts` |
+| 请求解析（query/body/target/response） | `wecom/src/app/request-*.ts` |
+| XML 解析 | `wecom/src/app/xml-parser.ts` |
+| 加解密处理 | `wecom/src/app/decrypt-handler.ts` |
+| 入站消息解析（按 MsgType） | `wecom/src/app/inbound-resolver.ts` |
+| 文本快捷分支（命令/自然语言发文件） | `wecom/src/app/text-shortcuts.ts` |
+| 自然语言文件发送 | `wecom/src/app/file-send.ts` + `file-search.ts` + `file-send-state.ts` + `file-delivery.ts` |
+| Agent 回复投递（文本+媒体） | `wecom/src/app/reply-delivery.ts` |
+| 主动推送编排 | `wecom/src/app/push-handler.ts` |
+| 主动推送子模块 | `wecom/src/app/push-*.ts` |
+
+### Bot 模式
+
+| 职责 | 入口/模块 |
+|------|-----------|
+| Webhook 主流程编排 | `wecom/src/bot/webhook-handler.ts` |
+| 请求解析（query/body/target/response） | `wecom/src/bot/request-*.ts` |
+| 加解密处理 | `wecom/src/bot/decrypt-handler.ts` |
+| 幂等去重 | `wecom/src/bot/dedupe-handler.ts` |
+| 明文消息解析 | `wecom/src/bot/plain-message-parser.ts` |
+| 普通消息路由 | `wecom/src/bot/message-router.ts` |
+| 事件分发与子处理器 | `wecom/src/bot/event-handler.ts` / `event-reply.ts` / `template-card-event-handler.ts` |
+| Stream 状态与工具函数 | `wecom/src/bot/state.ts` |
+| Stream 执行主编排 | `wecom/src/bot/stream-agent.ts` |
+| Stream 子模块 | `wecom/src/bot/stream-*.ts`（`stream-deliver` / `stream-fallback` / `stream-template-card` / `stream-content`） |
+
 ## 安装
 
 ### npm 安装（推荐）

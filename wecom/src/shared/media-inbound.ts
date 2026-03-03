@@ -4,6 +4,7 @@ import { basename, join } from "node:path";
 import type { WecomWebhookTarget } from "../monitor.js";
 import type { MediaCacheEntry } from "./cache-utils.js";
 import { buildMediaCacheKey } from "./cache-utils.js";
+import { formatErrorDetail } from "./string-utils.js";
 import {
   buildInboundMediaPrompt,
   isMediaTooLargeError,
@@ -141,7 +142,7 @@ export async function processInboundMedia(params: {
 
     return { text: buildInboundMediaPrompt(msgtype, filename) };
   } catch (err) {
-    target.runtime.error?.(`wecom ${msgtype} download failed: ${String(err)}`);
+    target.runtime.error?.(`wecom ${msgtype} download failed: ${formatErrorDetail(err)}`);
     if (isMediaTooLargeError(err)) {
       return { text: MEDIA_TOO_LARGE[msgtype] };
     }

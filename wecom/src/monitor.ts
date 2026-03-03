@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import type { ClawdbotConfig, PluginRuntime } from "openclaw/plugin-sdk";
+import { registerWebhookTargetWithPluginRoute, type ClawdbotConfig } from "openclaw/plugin-sdk";
 
 import type { ResolvedWecomAccount } from "./types.js";
 import { handleWecomAppWebhook, handleWecomPushRequest } from "./wecom-app.js";
@@ -18,7 +18,6 @@ export type WecomWebhookTarget = {
   account: ResolvedWecomAccount;
   config: ClawdbotConfig;
   runtime: WecomRuntimeEnv;
-  core: PluginRuntime;
   path: string;
   statusSink?: (patch: { lastInboundAt?: number; lastOutboundAt?: number }) => void;
 };
@@ -41,13 +40,28 @@ function resolvePath(req: IncomingMessage): string {
 export function registerWecomWebhookTarget(target: WecomWebhookTarget): () => void {
   const key = normalizeWebhookPath(target.path);
   const normalizedTarget = { ...target, path: key };
-  const existing = webhookTargets.get(key) ?? [];
-  const next = [...existing, normalizedTarget];
-  webhookTargets.set(key, next);
+  const registered = registerWebhookTargetWithPluginRoute({
+    targetsByPath: webhookTargets,
+    target: normalizedTarget,
+    route: {
+      auth: "plugin",
+      match: "exact",
+      pluginId: "openclaw-wecom",
+      source: "wecom-webhook",
+      accountId: normalizedTarget.account.accountId,
+      log: normalizedTarget.runtime.log,
+      handler: async (req, res) => {
+        const handled = await handleWecomWebhookRequest(req, res);
+        if (!handled && !res.headersSent) {
+          res.statusCode = 404;
+          res.setHeader("Content-Type", "text/plain; charset=utf-8");
+          res.end("Not Found");
+        }
+      },
+    },
+  });
   return () => {
-    const updated = (webhookTargets.get(key) ?? []).filter((entry) => entry !== normalizedTarget);
-    if (updated.length > 0) webhookTargets.set(key, updated);
-    else webhookTargets.delete(key);
+    registered.unregister();
   };
 }
 

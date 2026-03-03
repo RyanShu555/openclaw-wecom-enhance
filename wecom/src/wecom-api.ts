@@ -1,6 +1,6 @@
 import { splitWecomText } from "./format.js";
 import type { ResolvedWecomAccount } from "./types.js";
-import { sleep, num } from "./shared/string-utils.js";
+import { sleep, num, WecomApiError } from "./shared/string-utils.js";
 import { MEDIA_TOO_LARGE_ERROR } from "./shared/media-shared.js";
 
 // ── 出站代理支持 ──
@@ -103,6 +103,14 @@ function ensureAppConfig(account: ResolvedWecomAccount): { corpId: string; corpS
   return { corpId, corpSecret, agentId };
 }
 
+/** 使指定 account 的 token 缓存失效，下次调用会重新获取 */
+function invalidateToken(account: ResolvedWecomAccount): void {
+  const corpId = account.corpId ?? "";
+  const agentId = account.agentId ?? 0;
+  const cacheKey = `${corpId}:${agentId}`;
+  accessTokenCaches.delete(cacheKey);
+}
+
 function resolveNetworkConfig(account: ResolvedWecomAccount): { timeoutMs: number; retries: number; retryDelayMs: number } {
   const cfg = account.config.network ?? {};
   return {
@@ -180,7 +188,12 @@ export async function getWecomAccessToken(account: ResolvedWecomAccount): Promis
       const tokenRes = await fetchWithRetry(account, tokenUrl);
       const tokenJson = await tokenRes.json();
       if (!tokenJson?.access_token) {
-        throw new Error(`WeCom gettoken failed: errcode=${tokenJson?.errcode ?? "unknown"}, errmsg=${tokenJson?.errmsg ?? "unknown"}`);
+        throw new WecomApiError({
+          errcode: tokenJson?.errcode ?? -1,
+          errmsg: tokenJson?.errmsg ?? "unknown (no access_token in response)",
+          apiUrl: "gettoken",
+          accountId: account.accountId,
+        });
       }
 
       cache.token = tokenJson.access_token;
@@ -203,24 +216,39 @@ async function sendWecomTextSingle(params: {
 }): Promise<void> {
   const { account, toUser, chatId, text } = params;
   const { agentId } = ensureAppConfig(account);
-  const accessToken = await getWecomAccessToken(account);
-  const useChat = Boolean(chatId);
-  const sendUrl = useChat
-    ? `https://qyapi.weixin.qq.com/cgi-bin/appchat/send?access_token=${encodeURIComponent(accessToken)}`
-    : `https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${encodeURIComponent(accessToken)}`;
 
-  const body = useChat
-    ? { chatid: chatId, msgtype: "text", text: { content: text } }
-    : { touser: toUser, msgtype: "text", agentid: agentId, text: { content: text } };
+  for (let tokenAttempt = 0; tokenAttempt < 2; tokenAttempt++) {
+    const accessToken = await getWecomAccessToken(account);
+    const useChat = Boolean(chatId);
+    const sendUrl = useChat
+      ? `https://qyapi.weixin.qq.com/cgi-bin/appchat/send?access_token=${encodeURIComponent(accessToken)}`
+      : `https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${encodeURIComponent(accessToken)}`;
 
-  const sendRes = await fetchWithRetry(account, sendUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const sendJson = await sendRes.json();
-  if (sendJson?.errcode !== 0) {
-    throw new Error(`WeCom message/send failed: errcode=${sendJson?.errcode}, errmsg=${sendJson?.errmsg ?? "unknown"}`);
+    const body = useChat
+      ? { chatid: chatId, msgtype: "text", text: { content: text } }
+      : { touser: toUser, msgtype: "text", agentid: agentId, text: { content: text } };
+
+    const sendRes = await fetchWithRetry(account, sendUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const sendJson = await sendRes.json();
+    if (sendJson?.errcode === 0) return;
+
+    const apiErr = new WecomApiError({
+      errcode: sendJson?.errcode ?? -1,
+      errmsg: sendJson?.errmsg ?? "unknown",
+      apiUrl: useChat ? "appchat/send" : "message/send",
+      accountId: account.accountId,
+    });
+
+    // token 过期：清缓存后重试一次
+    if (apiErr.isTokenExpired && tokenAttempt === 0) {
+      invalidateToken(account);
+      continue;
+    }
+    throw apiErr;
   }
 }
 
@@ -245,21 +273,35 @@ export async function uploadWecomMedia(params: {
   filename: string;
 }): Promise<string> {
   const { account, type, buffer, filename } = params;
-  const accessToken = await getWecomAccessToken(account);
-  const uploadUrl = `https://qyapi.weixin.qq.com/cgi-bin/media/upload?access_token=${encodeURIComponent(accessToken)}&type=${encodeURIComponent(type)}`;
 
-  const form = new FormData();
-  form.append("media", new Blob([buffer]), filename);
+  for (let tokenAttempt = 0; tokenAttempt < 2; tokenAttempt++) {
+    const accessToken = await getWecomAccessToken(account);
+    const uploadUrl = `https://qyapi.weixin.qq.com/cgi-bin/media/upload?access_token=${encodeURIComponent(accessToken)}&type=${encodeURIComponent(type)}`;
 
-  const res = await fetchWithRetry(account, uploadUrl, {
-    method: "POST",
-    body: form,
-  });
-  const json = await res.json();
-  if (!json?.media_id) {
-    throw new Error(`WeCom media upload failed: errcode=${json?.errcode}, errmsg=${json?.errmsg ?? "unknown"}`);
+    const form = new FormData();
+    form.append("media", new Blob([buffer]), filename);
+
+    const res = await fetchWithRetry(account, uploadUrl, {
+      method: "POST",
+      body: form,
+    });
+    const json = await res.json();
+    if (json?.media_id) return json.media_id;
+
+    const apiErr = new WecomApiError({
+      errcode: json?.errcode ?? -1,
+      errmsg: json?.errmsg ?? "unknown",
+      apiUrl: "media/upload",
+      accountId: account.accountId,
+    });
+    if (apiErr.isTokenExpired && tokenAttempt === 0) {
+      invalidateToken(account);
+      continue;
+    }
+    throw apiErr;
   }
-  return json.media_id;
+  // unreachable, but TS needs a return
+  throw new Error("uploadWecomMedia: unexpected flow");
 }
 
 export type MediaType = "image" | "voice" | "video" | "file";
@@ -278,28 +320,41 @@ export async function sendWecomMedia(params: {
 }): Promise<void> {
   const { account, toUser, chatId, mediaId, mediaType, title, description } = params;
   const { agentId } = ensureAppConfig(account);
-  const accessToken = await getWecomAccessToken(account);
-  const useChat = Boolean(chatId);
-  const sendUrl = useChat
-    ? `https://qyapi.weixin.qq.com/cgi-bin/appchat/send?access_token=${encodeURIComponent(accessToken)}`
-    : `https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${encodeURIComponent(accessToken)}`;
 
-  const mediaPayload = mediaType === "video"
-    ? { media_id: mediaId, title: title ?? "Video", description: description ?? "" }
-    : { media_id: mediaId };
+  for (let tokenAttempt = 0; tokenAttempt < 2; tokenAttempt++) {
+    const accessToken = await getWecomAccessToken(account);
+    const useChat = Boolean(chatId);
+    const sendUrl = useChat
+      ? `https://qyapi.weixin.qq.com/cgi-bin/appchat/send?access_token=${encodeURIComponent(accessToken)}`
+      : `https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${encodeURIComponent(accessToken)}`;
 
-  const body = useChat
-    ? { chatid: chatId, msgtype: mediaType, [mediaType]: mediaPayload }
-    : { touser: toUser, msgtype: mediaType, agentid: agentId, [mediaType]: mediaPayload };
+    const mediaPayload = mediaType === "video"
+      ? { media_id: mediaId, title: title ?? "Video", description: description ?? "" }
+      : { media_id: mediaId };
 
-  const sendRes = await fetchWithRetry(account, sendUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const sendJson = await sendRes.json();
-  if (sendJson?.errcode !== 0) {
-    throw new Error(`WeCom ${mediaType} send failed: errcode=${sendJson?.errcode}, errmsg=${sendJson?.errmsg ?? "unknown"}`);
+    const body = useChat
+      ? { chatid: chatId, msgtype: mediaType, [mediaType]: mediaPayload }
+      : { touser: toUser, msgtype: mediaType, agentid: agentId, [mediaType]: mediaPayload };
+
+    const sendRes = await fetchWithRetry(account, sendUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const sendJson = await sendRes.json();
+    if (sendJson?.errcode === 0) return;
+
+    const apiErr = new WecomApiError({
+      errcode: sendJson?.errcode ?? -1,
+      errmsg: sendJson?.errmsg ?? "unknown",
+      apiUrl: useChat ? "appchat/send" : "message/send",
+      accountId: account.accountId,
+    });
+    if (apiErr.isTokenExpired && tokenAttempt === 0) {
+      invalidateToken(account);
+      continue;
+    }
+    throw apiErr;
   }
 }
 
@@ -331,7 +386,12 @@ export async function downloadWecomMedia(params: {
   ensureNotTooLarge(res, maxBytes);
   if (contentType.includes("application/json")) {
     const json = await res.json();
-    throw new Error(`WeCom media download failed: errcode=${json?.errcode}, errmsg=${json?.errmsg ?? "unknown"}`);
+    throw new WecomApiError({
+      errcode: json?.errcode ?? -1,
+      errmsg: json?.errmsg ?? "unknown",
+      apiUrl: "media/get",
+      accountId: account.accountId,
+    });
   }
 
   const buffer = Buffer.from(await res.arrayBuffer());

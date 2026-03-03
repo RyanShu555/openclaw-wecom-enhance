@@ -11,10 +11,16 @@ import {
   setAccountEnabledInConfigSection,
 } from "openclaw/plugin-sdk";
 
-import { listWecomAccountIds, resolveDefaultWecomAccountId, resolveWecomAccount } from "./accounts.js";
-import { WecomConfigSchema } from "./config-schema.js";
+import {
+  listWecomAccountIds,
+  resolveDefaultWecomAccountId,
+  resolveWecomAccount,
+  WecomConfigSchema,
+} from "./config/index.js";
 import type { ResolvedWecomAccount } from "./types.js";
 import { registerWecomWebhookTarget } from "./monitor.js";
+import { getWecomAccessToken } from "./wecom-api.js";
+import { WecomApiError } from "./shared/string-utils.js";
 
 const meta = {
   id: "wecom",
@@ -131,7 +137,7 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
     textChunkLimit: 20480,
     sendText: async ({ cfg, to, text, accountId }) => {
       try {
-        const resolvedAccount = accountId ?? DEFAULT_ACCOUNT_ID;
+        const resolvedAccount = accountId?.trim() || resolveDefaultWecomAccountId(cfg as ClawdbotConfig);
         const account = resolveWecomAccount({ cfg: cfg as ClawdbotConfig, accountId: resolvedAccount });
         let target = typeof to === "string" ? to.trim() : "";
         if (target.toLowerCase().startsWith("wecom:")) {
@@ -196,7 +202,7 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
     },
     sendMedia: async ({ cfg, to, text, mediaUrl, accountId }) => {
       try {
-        const resolvedAccount = accountId ?? DEFAULT_ACCOUNT_ID;
+        const resolvedAccount = accountId?.trim() || resolveDefaultWecomAccountId(cfg as ClawdbotConfig);
         const account = resolveWecomAccount({ cfg: cfg as ClawdbotConfig, accountId: resolvedAccount });
         let target = typeof to === "string" ? to.trim() : "";
         if (target.toLowerCase().startsWith("wecom:")) {
@@ -311,7 +317,22 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
       probe: snapshot.probe,
       lastProbeAt: snapshot.lastProbeAt ?? null,
     }),
-    probeAccount: async () => ({ ok: true }),
+    probeAccount: async ({ account }) => {
+      // App 模式：尝试 gettoken 验证凭据 + IP 白名单
+      if (account.corpId && account.corpSecret && account.agentId) {
+        try {
+          await getWecomAccessToken(account);
+          return { ok: true };
+        } catch (err) {
+          const detail = err instanceof WecomApiError
+            ? `errcode=${err.errcode}, errmsg=${err.errmsg}`
+            : (err instanceof Error ? err.message : String(err));
+          return { ok: false, error: detail };
+        }
+      }
+      // Bot-only 模式：无主动探测手段，只能假设 ok
+      return { ok: true };
+    },
     buildAccountSnapshot: ({ account, runtime }) => ({
       accountId: account.accountId,
       name: account.name,
@@ -333,7 +354,14 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
       if (!account.configured) {
         ctx.log?.warn(`[${account.accountId}] wecom not configured; skipping webhook registration`);
         ctx.setStatus({ accountId: account.accountId, running: false, configured: false });
-        return { stop: () => {} };
+        return;
+      }
+      const controlUi = (ctx.cfg as ClawdbotConfig).gateway?.controlUi as { enabled?: boolean } | undefined;
+      if (controlUi?.enabled !== false) {
+        ctx.log?.warn(
+          `[${account.accountId}] gateway.controlUi.enabled=true may intercept WeCom webhook POST on some old OpenClaw versions (HTTP 405). ` +
+          "If app/bot inbound has no logs, upgrade OpenClaw first; only use disabling Control UI as a temporary fallback.",
+        );
       }
       const path = (account.config.webhookPath ?? "/wecom").trim();
       const pushPath = path.endsWith("/") ? `${path}push` : `${path}/push`;
@@ -341,7 +369,6 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
         account,
         config: ctx.cfg as ClawdbotConfig,
         runtime: ctx.runtime,
-        core: ({} as unknown) as any,
         path,
         statusSink: (patch) => ctx.setStatus({ accountId: ctx.accountId, ...patch }),
       });
@@ -349,7 +376,6 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
         account,
         config: ctx.cfg as ClawdbotConfig,
         runtime: ctx.runtime,
-        core: ({} as unknown) as any,
         path: pushPath,
         statusSink: (patch) => ctx.setStatus({ accountId: ctx.accountId, ...patch }),
       });
@@ -362,17 +388,34 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
         webhookPath: path,
         lastStartAt: Date.now(),
       });
-      return {
-        stop: () => {
-          unregister();
-          unregisterPush();
-          ctx.setStatus({
-            accountId: account.accountId,
-            running: false,
-            lastStopAt: Date.now(),
-          });
-        },
+
+      // Long-lived task: keep the Promise pending until the framework signals abort.
+      // Without this, an immediately-resolved Promise causes OpenClaw core to treat
+      // the channel as "exited" and trigger an infinite restart loop.
+      let stopped = false;
+      const stop = () => {
+        if (stopped) return;
+        stopped = true;
+        unregister();
+        unregisterPush();
+        ctx.setStatus({
+          accountId: account.accountId,
+          running: false,
+          lastStopAt: Date.now(),
+        });
       };
+      try {
+        if (ctx.abortSignal.aborted) return;
+        await new Promise<void>((resolve) => {
+          const onAbort = () => {
+            ctx.abortSignal.removeEventListener("abort", onAbort);
+            resolve();
+          };
+          ctx.abortSignal.addEventListener("abort", onAbort, { once: true });
+        });
+      } finally {
+        stop();
+      }
     },
     stopAccount: async (ctx) => {
       ctx.setStatus({
