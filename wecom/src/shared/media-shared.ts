@@ -263,7 +263,7 @@ export async function loadOutboundMedia(params: {
  */
 export function buildInboundMediaPrompt(msgtype: MediaType, filename?: string): string {
   if (msgtype === "image") {
-    return "[用户发送了一张图片]\n\n请直接根据图片内容回复用户（图片将作为视觉输入提供；无需使用 Read 工具读取图片文件）。";
+    return "[用户发送了一张图片]\n\n请先准确描述图片中的关键信息，再根据用户问题回答；若用户未提出具体问题，请先询问他希望你基于这张图片做什么。";
   }
   if (msgtype === "voice") return "[用户发送了一条语音消息]\n\n请根据语音内容回复用户。";
   if (msgtype === "video") return "[用户发送了一个视频文件]\n\n请根据视频内容回复用户。";

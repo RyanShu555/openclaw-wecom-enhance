@@ -51,20 +51,28 @@ export async function resolveAppInboundMessage(params: {
 
   if (msgType === "voice") {
     const recognition = String(msgObj?.Recognition ?? "").trim();
+    const mediaId = String(msgObj?.MediaId ?? "");
+    let mediaResult: Awaited<ReturnType<typeof processInboundMedia>> | null = null;
+    if (mediaId) {
+      mediaResult = await processInboundMedia({
+        target, msgtype: "voice", mediaId,
+        getCache: getLocalCachedMedia, storeCache: storeLocalCachedMedia,
+      });
+      if (mediaResult.media) {
+        mediaContext = {
+          type: "voice",
+          path: mediaResult.media.path,
+          mimeType: mediaResult.media.mimeType,
+          url: mediaResult.media.url,
+        };
+      }
+    }
     if (recognition) {
       messageText = `[语音消息转写] ${recognition}`;
+    } else if (mediaResult) {
+      messageText = mediaResult.text;
     } else {
-      const mediaId = String(msgObj?.MediaId ?? "");
-      if (mediaId) {
-        const result = await processInboundMedia({
-          target, msgtype: "voice", mediaId,
-          getCache: getLocalCachedMedia, storeCache: storeLocalCachedMedia,
-        });
-        messageText = result.text;
-        if (result.media) mediaContext = { type: "voice", path: result.media.path, mimeType: result.media.mimeType, url: result.media.url };
-      } else {
-        messageText = "[用户发送了一条语音消息]\n\n请告诉用户语音处理暂时不可用。";
-      }
+      messageText = "[用户发送了一条语音消息]\n\n请告诉用户语音处理暂时不可用。";
     }
   }
 

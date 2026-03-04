@@ -14,7 +14,11 @@ export function selectPushTarget(targets: WecomWebhookTarget[], accountId?: stri
 }
 
 export function resolvePushToken(target: WecomWebhookTarget): string {
-  return target.account.config.pushToken?.trim() || "";
+  // Fallback to callbackToken to reduce setup friction for App push endpoint.
+  // Dedicated pushToken still has priority when configured.
+  return target.account.config.pushToken?.trim()
+    || target.account.config.callbackToken?.trim()
+    || "";
 }
 
 export function isPushTokenMatch(expectedToken: string, requestToken: string): boolean {

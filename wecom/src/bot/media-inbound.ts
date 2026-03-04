@@ -256,18 +256,26 @@ export async function buildInboundBody(params: { target: WecomWebhookTarget; msg
   }
   if (msgtype === "voice") {
     const content = (msg as any).voice?.content;
-    if (typeof content === "string" && content.trim()) return { text: content.trim() };
+    const voiceContent = typeof content === "string" ? content.trim() : "";
     const recognition = pickString(
       (msg as any).voice?.recognition,
       (msg as any).voice?.text,
       (msg as any).voice?.transcript,
       (msg as any).recognition,
     );
-    if (recognition) return { text: recognition };
+    const recognizedText = voiceContent || recognition;
     const url = resolveBotMediaUrl(msg as any, "voice");
     const base64 = resolveBotMediaBase64(msg as any, "voice");
     const mediaId = resolveBotMediaId(msg as any, "voice");
-    return await buildBotMediaMessage({ target, msgtype: "voice", url, base64, mediaId });
+    const mediaResult = await buildBotMediaMessage({ target, msgtype: "voice", url, base64, mediaId });
+    if (mediaResult.media) {
+      return {
+        text: recognizedText || mediaResult.text,
+        media: mediaResult.media,
+      };
+    }
+    if (recognizedText) return { text: recognizedText };
+    return mediaResult;
   }
   if (msgtype === "mixed") {
     const items = (msg as any).mixed?.msg_item;

@@ -17,6 +17,10 @@ export type WecomAppConfig = {
   agentId?: string | number;
   callbackToken?: string;
   callbackAesKey?: string;
+  // 兼容 matrix 写法：agent.token / agent.encodingAESKey
+  token?: string;
+  encodingAESKey?: string;
+  pushToken?: string;
 };
 
 export type WecomAccountConfig = {
@@ -33,6 +37,7 @@ export type WecomAccountConfig = {
   token?: string;
   encodingAESKey?: string;
   receiveId?: string;
+  bot?: WecomBotConfig;
 
   // Internal app settings
   corpId?: string;
@@ -41,8 +46,9 @@ export type WecomAccountConfig = {
   callbackToken?: string;
   callbackAesKey?: string;
   pushToken?: string;
+  agent?: WecomAppConfig;
 
-  // 工作目录（用于文件搜索）
+  // 工作目录（可供模型/工具链路使用）
   workspace?: string;
 
   // Media handling
@@ -115,7 +121,7 @@ export type WecomAccountConfig = {
     adminUsers?: string[];
   };
 
-  // Send queue behavior (e.g., /sendfile)
+  // Send queue behavior (e.g., push burst delivery)
   sendQueue?: {
     intervalMs?: number;
   };
@@ -128,7 +134,15 @@ export type WecomAccountConfig = {
 
 export type WecomConfig = WecomAccountConfig & {
   defaultAccount?: string;
-  accounts?: Record<string, WecomAccountConfig>;
+  // 兼容 accounts.default = "xxx"
+  accounts?: Record<string, WecomAccountConfig | string>;
+};
+
+export type WecomAccountConflict = {
+  type: "duplicate_bot_token" | "duplicate_app_identity" | "duplicate_app_callback";
+  accountId: string;
+  ownerAccountId: string;
+  message: string;
 };
 
 export type ResolvedWecomAccount = {

@@ -102,8 +102,8 @@
       // 私聊策略配置
       // ----------------------------------------------------------
       "dm": {
-        "policy": "pairing",                  // 私聊策略: "pairing" | "allow" | "deny"
-        "allowFrom": []                       // 允许私聊的用户列表（policy 为 allow 时生效）
+        "policy": "pairing",                  // 私聊策略: "pairing" | "allowlist" | "open" | "disabled"
+        "allowFrom": []                       // 允许私聊的用户列表（policy=allowlist 时生效）
       },
 
       // ----------------------------------------------------------
@@ -115,22 +115,26 @@
         // Bot 模式账户（智能机器人 API）
         "bot": {
           "mode": "bot",                      // 账户模式
-          "webhookPath": "/wecom/bot",        // 回调路径
-          "token": "YOUR_BOT_TOKEN",          // 企微后台配置的 Token
-          "encodingAESKey": "YOUR_BOT_AES_KEY",  // 企微后台生成的 EncodingAESKey（43位）
-          "receiveId": "YOUR_BOT_ID"          // Bot ID（aibotid）
+          "webhookPath": "/plugins/wecom/bot/bot", // 推荐回调路径（支持 /wecom/bot 兼容）
+          "bot": {
+            "token": "YOUR_BOT_TOKEN",          // 企微后台配置的 Token
+            "encodingAESKey": "YOUR_BOT_AES_KEY",  // 企微后台生成的 EncodingAESKey（43位）
+            "receiveId": "YOUR_BOT_ID"          // Bot ID（aibotid）
+          }
         },
 
         // App 模式账户（自建应用）
         "app": {
           "mode": "app",                      // 账户模式
-          "webhookPath": "/wecom/app",        // 回调路径
-          "corpId": "YOUR_CORP_ID",           // 企业 ID（企微管理后台 > 我的企业）
-          "corpSecret": "YOUR_CORP_SECRET",   // 应用 Secret（应用管理 > 自建应用）
-          "agentId": 1000001,                 // 应用 AgentId（整数）
-          "callbackToken": "YOUR_CALLBACK_TOKEN",      // 回调 Token
-          "callbackAesKey": "YOUR_CALLBACK_AES_KEY",   // 回调 EncodingAESKey（43位）
-          "pushToken": "YOUR_PUSH_TOKEN"      // 主动推送鉴权 Token（可选）
+          "webhookPath": "/plugins/wecom/agent/app", // 推荐回调路径（支持 /wecom/app 兼容）
+          "agent": {
+            "corpId": "YOUR_CORP_ID",           // 企业 ID（企微管理后台 > 我的企业）
+            "corpSecret": "YOUR_CORP_SECRET",   // 应用 Secret（应用管理 > 自建应用）
+            "agentId": 1000001,                 // 应用 AgentId（整数）
+            "callbackToken": "YOUR_CALLBACK_TOKEN",      // 回调 Token
+            "callbackAesKey": "YOUR_CALLBACK_AES_KEY",   // 回调 EncodingAESKey（43位）
+            "pushToken": "YOUR_PUSH_TOKEN"      // 主动推送鉴权 Token（可选）
+          }
         }
       }
     }

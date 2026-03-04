@@ -14,6 +14,8 @@ export type PushPayload = PushMessage & {
   accountId?: string;
   toUser?: string;
   chatId?: string;
+  toParty?: string | string[];
+  toTag?: string | string[];
   token?: string;
   intervalMs?: number;
   messages?: PushMessage[];

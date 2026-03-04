@@ -14,6 +14,7 @@ import {
 import {
   listWecomAccountIds,
   resolveDefaultWecomAccountId,
+  resolveWecomAccountConflict,
   resolveWecomAccount,
   WecomConfigSchema,
 } from "./config/index.js";
@@ -21,6 +22,7 @@ import type { ResolvedWecomAccount } from "./types.js";
 import { registerWecomWebhookTarget } from "./monitor.js";
 import { getWecomAccessToken } from "./wecom-api.js";
 import { WecomApiError } from "./shared/string-utils.js";
+import { resolveWecomWebhookRoutePlan } from "./webhook-routes.js";
 
 const meta = {
   id: "wecom",
@@ -38,6 +40,32 @@ function normalizeWecomMessagingTarget(raw: string): string | undefined {
   const trimmed = raw.trim();
   if (!trimmed) return undefined;
   return trimmed.replace(/^(wecom|wechatwork|wework|qywx):/i, "").trim() || undefined;
+}
+
+type ParsedWecomTarget = {
+  toUser?: string;
+  chatId?: string;
+  toParty?: string;
+  toTag?: string;
+};
+
+function parseWecomTarget(raw: string): ParsedWecomTarget | null {
+  const normalized = normalizeWecomMessagingTarget(raw) ?? "";
+  if (!normalized) return null;
+  const lower = normalized.toLowerCase();
+  const parsePrefixed = (prefixes: string[]): string | undefined => {
+    const prefix = prefixes.find((candidate) => lower.startsWith(candidate));
+    if (!prefix) return undefined;
+    const value = normalized.slice(prefix.length).trim();
+    return value || undefined;
+  };
+  const chatId = parsePrefixed(["chat:", "chatid:", "group:"]);
+  if (chatId) return { chatId };
+  const toParty = parsePrefixed(["party:", "dept:", "department:"]);
+  if (toParty) return { toParty };
+  const toTag = parsePrefixed(["tag:"]);
+  if (toTag) return { toTag };
+  return { toUser: normalized };
 }
 
 export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
@@ -81,17 +109,33 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
           "agentId",
           "callbackToken",
           "callbackAesKey",
+          "bot",
+          "agent",
           "welcomeText",
         ],
         accountId,
       }),
-    isConfigured: (account) => account.configured,
-    describeAccount: (account): ChannelAccountSnapshot => ({
+    isConfigured: (account, cfg) => {
+      if (!account.configured) return false;
+      return !resolveWecomAccountConflict({
+        cfg: cfg as ClawdbotConfig,
+        accountId: account.accountId,
+      });
+    },
+    unconfiguredReason: (account, cfg) =>
+      resolveWecomAccountConflict({
+        cfg: cfg as ClawdbotConfig,
+        accountId: account.accountId,
+      })?.message ?? "not configured",
+    describeAccount: (account, cfg): ChannelAccountSnapshot => ({
       accountId: account.accountId,
       name: account.name,
       enabled: account.enabled,
-      configured: account.configured,
-      webhookPath: account.config.webhookPath ?? "/wecom",
+      configured: account.configured && !resolveWecomAccountConflict({
+        cfg: cfg as ClawdbotConfig,
+        accountId: account.accountId,
+      }),
+      webhookPath: resolveWecomWebhookRoutePlan(account).primaryPath,
     }),
     resolveAllowFrom: ({ cfg, accountId }) => {
       const account = resolveWecomAccount({ cfg: cfg as ClawdbotConfig, accountId });
@@ -106,7 +150,8 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
   security: {
     resolveDmPolicy: ({ cfg, accountId, account }) => {
       const resolvedAccountId = accountId ?? account.accountId ?? DEFAULT_ACCOUNT_ID;
-      const useAccountPath = Boolean((cfg as ClawdbotConfig).channels?.wecom?.accounts?.[resolvedAccountId]);
+      const accountEntry = (cfg as ClawdbotConfig).channels?.wecom?.accounts?.[resolvedAccountId];
+      const useAccountPath = Boolean(accountEntry && typeof accountEntry === "object");
       const basePath = useAccountPath ? `channels.wecom.accounts.${resolvedAccountId}.` : "channels.wecom.";
       return {
         policy: account.config.dm?.policy ?? "pairing",
@@ -139,16 +184,13 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
       try {
         const resolvedAccount = accountId?.trim() || resolveDefaultWecomAccountId(cfg as ClawdbotConfig);
         const account = resolveWecomAccount({ cfg: cfg as ClawdbotConfig, accountId: resolvedAccount });
-        let target = typeof to === "string" ? to.trim() : "";
-        if (target.toLowerCase().startsWith("wecom:")) {
-          target = target.slice("wecom:".length).trim();
-        }
-        if (!target) {
+        const parsedTarget = typeof to === "string" ? parseWecomTarget(to) : null;
+        if (!parsedTarget) {
           return {
             channel: "wecom",
             ok: false,
             messageId: "",
-            error: new Error("WeCom outbound requires --to <userid|chatid>."),
+            error: new Error("WeCom outbound requires --to <userid|chatid|party:id|tag:id>."),
           };
         }
         if (!account.corpId || !account.corpSecret || !account.agentId) {
@@ -160,32 +202,14 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
           };
         }
         const { sendWecomText } = await import("./wecom-api.js");
-        const lower = target.toLowerCase();
-        const chatPrefixes = ["chat:", "chatid:", "group:"];
-        const matchedPrefix = chatPrefixes.find((prefix) => lower.startsWith(prefix));
-        if (matchedPrefix) {
-          const chatId = target.slice(matchedPrefix.length).trim();
-          if (!chatId) {
-            return {
-              channel: "wecom",
-              ok: false,
-              messageId: "",
-              error: new Error("WeCom outbound requires chatId after chat:/chatid:/group: prefix."),
-            };
-          }
-          await sendWecomText({
-            account,
-            toUser: "",
-            chatId,
-            text: String(text ?? ""),
-          });
-        } else {
-          await sendWecomText({
-            account,
-            toUser: target,
-            text: String(text ?? ""),
-          });
-        }
+        await sendWecomText({
+          account,
+          toUser: parsedTarget.toUser,
+          chatId: parsedTarget.chatId,
+          toParty: parsedTarget.toParty,
+          toTag: parsedTarget.toTag,
+          text: String(text ?? ""),
+        });
         return {
           channel: "wecom",
           ok: true,
@@ -204,16 +228,13 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
       try {
         const resolvedAccount = accountId?.trim() || resolveDefaultWecomAccountId(cfg as ClawdbotConfig);
         const account = resolveWecomAccount({ cfg: cfg as ClawdbotConfig, accountId: resolvedAccount });
-        let target = typeof to === "string" ? to.trim() : "";
-        if (target.toLowerCase().startsWith("wecom:")) {
-          target = target.slice("wecom:".length).trim();
-        }
-        if (!target) {
+        const parsedTarget = typeof to === "string" ? parseWecomTarget(to) : null;
+        if (!parsedTarget) {
           return {
             channel: "wecom",
             ok: false,
             messageId: "",
-            error: new Error("WeCom outbound requires --to <userid|chatid>."),
+            error: new Error("WeCom outbound requires --to <userid|chatid|party:id|tag:id>."),
           };
         }
         if (!account.corpId || !account.corpSecret || !account.agentId) {
@@ -236,12 +257,6 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
         const { readFile } = await import("node:fs/promises");
         const path = await import("path");
         const { stripFileProtocol } = await import("./shared/media-shared.js");
-
-        const lower = target.toLowerCase();
-        const chatPrefixes = ["chat:", "chatid:", "group:"];
-        const matchedPrefix = chatPrefixes.find((prefix) => lower.startsWith(prefix));
-        const chatId = matchedPrefix ? target.slice(matchedPrefix.length).trim() : undefined;
-        const toUser = matchedPrefix ? "" : target;
 
         let buffer: Buffer;
         let filename: string;
@@ -276,10 +291,25 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
         }
 
         const mediaId = await uploadWecomMedia({ account, type: mediaType, buffer, filename });
-        await sendWecomMedia({ account, toUser, chatId, mediaId, mediaType });
+        await sendWecomMedia({
+          account,
+          toUser: parsedTarget.toUser,
+          chatId: parsedTarget.chatId,
+          toParty: parsedTarget.toParty,
+          toTag: parsedTarget.toTag,
+          mediaId,
+          mediaType,
+        });
 
         if (text) {
-          await sendWecomText({ account, toUser, chatId, text: String(text) });
+          await sendWecomText({
+            account,
+            toUser: parsedTarget.toUser,
+            chatId: parsedTarget.chatId,
+            toParty: parsedTarget.toParty,
+            toTag: parsedTarget.toTag,
+            text: String(text),
+          });
         }
 
         return {
@@ -317,7 +347,12 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
       probe: snapshot.probe,
       lastProbeAt: snapshot.lastProbeAt ?? null,
     }),
-    probeAccount: async ({ account }) => {
+    probeAccount: async ({ account, cfg }) => {
+      const conflict = resolveWecomAccountConflict({
+        cfg: cfg as ClawdbotConfig,
+        accountId: account.accountId,
+      });
+      if (conflict) return { ok: false, error: conflict.message };
       // App 模式：尝试 gettoken 验证凭据 + IP 白名单
       if (account.corpId && account.corpSecret && account.agentId) {
         try {
@@ -333,16 +368,22 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
       // Bot-only 模式：无主动探测手段，只能假设 ok
       return { ok: true };
     },
-    buildAccountSnapshot: ({ account, runtime }) => ({
+    buildAccountSnapshot: ({ account, runtime, cfg }) => ({
       accountId: account.accountId,
       name: account.name,
       enabled: account.enabled,
-      configured: account.configured,
-      webhookPath: account.config.webhookPath ?? "/wecom",
+      configured: account.configured && !resolveWecomAccountConflict({
+        cfg: cfg as ClawdbotConfig,
+        accountId: account.accountId,
+      }),
+      webhookPath: resolveWecomWebhookRoutePlan(account).primaryPath,
       running: runtime?.running ?? false,
       lastStartAt: runtime?.lastStartAt ?? null,
       lastStopAt: runtime?.lastStopAt ?? null,
-      lastError: runtime?.lastError ?? null,
+      lastError: runtime?.lastError ?? resolveWecomAccountConflict({
+        cfg: cfg as ClawdbotConfig,
+        accountId: account.accountId,
+      })?.message ?? null,
       lastInboundAt: runtime?.lastInboundAt ?? null,
       lastOutboundAt: runtime?.lastOutboundAt ?? null,
       dmPolicy: account.config.dm?.policy ?? "pairing",
@@ -351,6 +392,20 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
   gateway: {
     startAccount: async (ctx) => {
       const account = ctx.account;
+      const conflict = resolveWecomAccountConflict({
+        cfg: ctx.cfg as ClawdbotConfig,
+        accountId: account.accountId,
+      });
+      if (conflict) {
+        ctx.log?.warn(`[${account.accountId}] ${conflict.message}`);
+        ctx.setStatus({
+          accountId: account.accountId,
+          running: false,
+          configured: false,
+          lastError: conflict.message,
+        });
+        return;
+      }
       if (!account.configured) {
         ctx.log?.warn(`[${account.accountId}] wecom not configured; skipping webhook registration`);
         ctx.setStatus({ accountId: account.accountId, running: false, configured: false });
@@ -363,29 +418,35 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
           "If app/bot inbound has no logs, upgrade OpenClaw first; only use disabling Control UI as a temporary fallback.",
         );
       }
-      const path = (account.config.webhookPath ?? "/wecom").trim();
-      const pushPath = path.endsWith("/") ? `${path}push` : `${path}/push`;
-      const unregister = registerWecomWebhookTarget({
-        account,
-        config: ctx.cfg as ClawdbotConfig,
-        runtime: ctx.runtime,
-        path,
-        statusSink: (patch) => ctx.setStatus({ accountId: ctx.accountId, ...patch }),
-      });
-      const unregisterPush = registerWecomWebhookTarget({
-        account,
-        config: ctx.cfg as ClawdbotConfig,
-        runtime: ctx.runtime,
-        path: pushPath,
-        statusSink: (patch) => ctx.setStatus({ accountId: ctx.accountId, ...patch }),
-      });
-      ctx.log?.info(`[${account.accountId}] wecom webhook registered at ${path}`);
-      ctx.log?.info(`[${account.accountId}] wecom push endpoint registered at ${pushPath}`);
+      const routePlan = resolveWecomWebhookRoutePlan(account);
+      const unregisterFns: Array<() => void> = [];
+      for (const path of routePlan.callbackPaths) {
+        unregisterFns.push(registerWecomWebhookTarget({
+          account,
+          config: ctx.cfg as ClawdbotConfig,
+          runtime: ctx.runtime,
+          path,
+          statusSink: (patch) => ctx.setStatus({ accountId: ctx.accountId, ...patch }),
+        }));
+      }
+      for (const path of routePlan.pushPaths) {
+        unregisterFns.push(registerWecomWebhookTarget({
+          account,
+          config: ctx.cfg as ClawdbotConfig,
+          runtime: ctx.runtime,
+          path,
+          statusSink: (patch) => ctx.setStatus({ accountId: ctx.accountId, ...patch }),
+        }));
+      }
+      ctx.log?.info(`[${account.accountId}] wecom callbacks registered at ${routePlan.callbackPaths.join(", ")}`);
+      if (routePlan.pushPaths.length > 0) {
+        ctx.log?.info(`[${account.accountId}] wecom push endpoints registered at ${routePlan.pushPaths.join(", ")}`);
+      }
       ctx.setStatus({
         accountId: account.accountId,
         running: true,
         configured: true,
-        webhookPath: path,
+        webhookPath: routePlan.primaryPath,
         lastStartAt: Date.now(),
       });
 
@@ -396,8 +457,7 @@ export const wecomPlugin: ChannelPlugin<ResolvedWecomAccount> = {
       const stop = () => {
         if (stopped) return;
         stopped = true;
-        unregister();
-        unregisterPush();
+        for (const unregister of unregisterFns) unregister();
         ctx.setStatus({
           accountId: account.accountId,
           running: false,

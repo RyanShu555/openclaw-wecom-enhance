@@ -26,8 +26,10 @@ export async function dispatchPushMessages(params: {
   payload: PushPayload;
   toUser: string;
   chatId: string;
+  toParty: string;
+  toTag: string;
 }): Promise<number> {
-  const { target, payload, toUser, chatId } = params;
+  const { target, payload, toUser, chatId, toParty, toTag } = params;
   const { messages, intervalMs } = resolvePushMessages(payload);
   let sent = 0;
 
@@ -41,6 +43,8 @@ export async function dispatchPushMessages(params: {
         account: target.account,
         toUser,
         chatId: chatId || undefined,
+        toParty: toParty || undefined,
+        toTag: toTag || undefined,
         maxBytes: resolveMediaMaxBytes(target),
         title: message.title,
         description: message.description,
@@ -51,6 +55,8 @@ export async function dispatchPushMessages(params: {
           accountId: target.account.accountId,
           toUser,
           chatId: chatId || undefined,
+          toParty: toParty || undefined,
+          toTag: toTag || undefined,
           mediaType: result.type,
         });
         sent += 1;
@@ -58,12 +64,21 @@ export async function dispatchPushMessages(params: {
 
       const text = markdownToWecomText(message.text ?? "");
       if (text) {
-        await sendWecomText({ account: target.account, toUser, chatId: chatId || undefined, text });
+        await sendWecomText({
+          account: target.account,
+          toUser,
+          chatId: chatId || undefined,
+          toParty: toParty || undefined,
+          toTag: toTag || undefined,
+          text,
+        });
         await appendOperationLog(target.account.config.operations?.logPath, {
           action: "push-text",
           accountId: target.account.accountId,
           toUser,
           chatId: chatId || undefined,
+          toParty: toParty || undefined,
+          toTag: toTag || undefined,
           textPreview: text.slice(0, 120),
         });
         sent += 1;

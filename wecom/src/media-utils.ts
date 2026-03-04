@@ -1,6 +1,6 @@
 import { readdir, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
 import type { WecomWebhookTarget } from "./monitor.js";
 import { isBlockedPath } from "./shared/media-shared.js";
@@ -9,6 +9,22 @@ import { numOpt } from "./shared/string-utils.js";
 const cleanupExecuted = new Map<string, number>();
 const CLEANUP_CACHE_MAX = 200;
 const CLEANUP_CACHE_TTL_MS = 24 * 3600 * 1000;
+
+function resolveOpenclawStateDir(): string {
+  return process.env.OPENCLAW_STATE_DIR
+    || process.env.CLAWDBOT_STATE_DIR
+    || join(homedir(), ".openclaw");
+}
+
+function resolveOpenclawMediaRoot(): string {
+  return join(resolveOpenclawStateDir(), "media");
+}
+
+function isPathWithin(path: string, root: string): boolean {
+  const rel = relative(root, path);
+  if (!rel) return true;
+  return !rel.startsWith("..") && !isAbsolute(rel);
+}
 
 export function resolveExtFromContentType(contentType: string, fallback: string): string {
   if (!contentType) return fallback;
@@ -72,11 +88,18 @@ export async function cleanupMediaDir(
 }
 
 export function resolveMediaTempDir(target: WecomWebhookTarget): string {
+  const mediaRoot = resolveOpenclawMediaRoot();
+  const compatibleDefault = join(mediaRoot, "wecom");
   const raw = target.account.config.media?.tempDir?.trim();
-  if (!raw) return join(tmpdir(), "openclaw-wecom");
+  if (!raw) return compatibleDefault;
   const resolved = resolve(raw);
   if (isBlockedPath(resolved)) {
-    return join(tmpdir(), "openclaw-wecom");
+    return compatibleDefault;
+  }
+  // OpenClaw 内部媒体处理仅信任 media 根目录，外部路径会导致附件被忽略
+  if (!isPathWithin(resolved, mediaRoot)) {
+    target.runtime.log?.(`[wecom] media.tempDir is outside OpenClaw media root, fallback to ${compatibleDefault}`);
+    return compatibleDefault;
   }
   return resolved;
 }

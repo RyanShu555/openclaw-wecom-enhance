@@ -38,6 +38,13 @@ export type WecomTokenState = {
   refreshPromise: Promise<string> | null;
 };
 
+type WecomRecipients = {
+  toUser?: string;
+  chatId?: string;
+  toParty?: string | string[];
+  toTag?: string | string[];
+};
+
 class RateLimiter {
   private maxConcurrent: number;
   private minInterval: number;
@@ -101,6 +108,45 @@ function ensureAppConfig(account: ResolvedWecomAccount): { corpId: string; corpS
     throw new Error("WeCom app not configured (corpId/corpSecret/agentId required)");
   }
   return { corpId, corpSecret, agentId };
+}
+
+function normalizeRecipientField(value?: string | string[]): string {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => String(item ?? "").trim())
+      .filter(Boolean)
+      .join("|");
+  }
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  return raw
+    .split(/[\s,|]+/g)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .join("|");
+}
+
+function resolveNormalizedRecipients(params: WecomRecipients): {
+  toUser: string;
+  chatId: string;
+  toParty: string;
+  toTag: string;
+} {
+  return {
+    toUser: normalizeRecipientField(params.toUser),
+    chatId: String(params.chatId ?? "").trim(),
+    toParty: normalizeRecipientField(params.toParty),
+    toTag: normalizeRecipientField(params.toTag),
+  };
+}
+
+function hasAnyRecipient(recipient: {
+  toUser: string;
+  chatId: string;
+  toParty: string;
+  toTag: string;
+}): boolean {
+  return Boolean(recipient.chatId || recipient.toUser || recipient.toParty || recipient.toTag);
 }
 
 /** 使指定 account 的 token 缓存失效，下次调用会重新获取 */
@@ -210,23 +256,36 @@ export async function getWecomAccessToken(account: ResolvedWecomAccount): Promis
 
 async function sendWecomTextSingle(params: {
   account: ResolvedWecomAccount;
-  toUser: string;
+  toUser?: string;
   chatId?: string;
+  toParty?: string | string[];
+  toTag?: string | string[];
   text: string;
 }): Promise<void> {
-  const { account, toUser, chatId, text } = params;
+  const { account, text } = params;
   const { agentId } = ensureAppConfig(account);
+  const recipient = resolveNormalizedRecipients(params);
+  if (!hasAnyRecipient(recipient)) {
+    throw new Error("WeCom sendWecomText requires recipient (toUser/chatId/toParty/toTag).");
+  }
 
   for (let tokenAttempt = 0; tokenAttempt < 2; tokenAttempt++) {
     const accessToken = await getWecomAccessToken(account);
-    const useChat = Boolean(chatId);
+    const useChat = Boolean(recipient.chatId);
     const sendUrl = useChat
       ? `https://qyapi.weixin.qq.com/cgi-bin/appchat/send?access_token=${encodeURIComponent(accessToken)}`
       : `https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${encodeURIComponent(accessToken)}`;
 
     const body = useChat
-      ? { chatid: chatId, msgtype: "text", text: { content: text } }
-      : { touser: toUser, msgtype: "text", agentid: agentId, text: { content: text } };
+      ? { chatid: recipient.chatId, msgtype: "text", text: { content: text } }
+      : {
+        touser: recipient.toUser,
+        toparty: recipient.toParty,
+        totag: recipient.toTag,
+        msgtype: "text",
+        agentid: agentId,
+        text: { content: text },
+      };
 
     const sendRes = await fetchWithRetry(account, sendUrl, {
       method: "POST",
@@ -254,15 +313,17 @@ async function sendWecomTextSingle(params: {
 
 export async function sendWecomText(params: {
   account: ResolvedWecomAccount;
-  toUser: string;
+  toUser?: string;
   chatId?: string;
+  toParty?: string | string[];
+  toTag?: string | string[];
   text: string;
 }): Promise<void> {
-  const { account, toUser, chatId, text } = params;
+  const { account, text } = params;
   const chunks = splitWecomText(text);
   for (const chunk of chunks) {
     if (!chunk) continue;
-    await sendWecomTextSingle({ account, toUser, chatId, text: chunk });
+    await sendWecomTextSingle({ ...params, account, text: chunk });
   }
 }
 
@@ -311,19 +372,25 @@ export type MediaType = "image" | "voice" | "video" | "file";
  */
 export async function sendWecomMedia(params: {
   account: ResolvedWecomAccount;
-  toUser: string;
+  toUser?: string;
   chatId?: string;
+  toParty?: string | string[];
+  toTag?: string | string[];
   mediaId: string;
   mediaType: MediaType;
   title?: string;
   description?: string;
 }): Promise<void> {
-  const { account, toUser, chatId, mediaId, mediaType, title, description } = params;
+  const { account, mediaId, mediaType, title, description } = params;
   const { agentId } = ensureAppConfig(account);
+  const recipient = resolveNormalizedRecipients(params);
+  if (!hasAnyRecipient(recipient)) {
+    throw new Error("WeCom sendWecomMedia requires recipient (toUser/chatId/toParty/toTag).");
+  }
 
   for (let tokenAttempt = 0; tokenAttempt < 2; tokenAttempt++) {
     const accessToken = await getWecomAccessToken(account);
-    const useChat = Boolean(chatId);
+    const useChat = Boolean(recipient.chatId);
     const sendUrl = useChat
       ? `https://qyapi.weixin.qq.com/cgi-bin/appchat/send?access_token=${encodeURIComponent(accessToken)}`
       : `https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=${encodeURIComponent(accessToken)}`;
@@ -333,8 +400,15 @@ export async function sendWecomMedia(params: {
       : { media_id: mediaId };
 
     const body = useChat
-      ? { chatid: chatId, msgtype: mediaType, [mediaType]: mediaPayload }
-      : { touser: toUser, msgtype: mediaType, agentid: agentId, [mediaType]: mediaPayload };
+      ? { chatid: recipient.chatId, msgtype: mediaType, [mediaType]: mediaPayload }
+      : {
+        touser: recipient.toUser,
+        toparty: recipient.toParty,
+        totag: recipient.toTag,
+        msgtype: mediaType,
+        agentid: agentId,
+        [mediaType]: mediaPayload,
+      };
 
     const sendRes = await fetchWithRetry(account, sendUrl, {
       method: "POST",
@@ -361,8 +435,10 @@ export async function sendWecomMedia(params: {
 // 便捷方法：发送文件
 export async function sendWecomFile(params: {
   account: ResolvedWecomAccount;
-  toUser: string;
+  toUser?: string;
   chatId?: string;
+  toParty?: string | string[];
+  toTag?: string | string[];
   mediaId: string;
 }): Promise<void> {
   return sendWecomMedia({ ...params, mediaType: "file" });

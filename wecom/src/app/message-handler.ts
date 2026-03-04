@@ -4,7 +4,6 @@ import { sendWecomText } from "../wecom-api.js";
 import { formatErrorDetail } from "../shared/string-utils.js";
 import { startAgentForApp } from "./reply-delivery.js";
 import { resolveAppInboundMessage } from "./inbound-resolver.js";
-import { tryHandleAppTextShortcuts } from "./text-shortcuts.js";
 
 function logVerbose(target: WecomWebhookTarget, message: string): void {
   target.runtime.log?.(`[wecom] ${message}`);
@@ -30,19 +29,8 @@ export async function processAppMessage(params: {
 
   if (!fromUser) return;
 
-  if (!messageText) {
+  if (!messageText && !mediaContext) {
     return;
-  }
-
-  if (msgType === "text") {
-    const handled = await tryHandleAppTextShortcuts({
-      target,
-      fromUser,
-      chatId,
-      isGroup,
-      text: messageText,
-    });
-    if (handled) return;
   }
 
   try {

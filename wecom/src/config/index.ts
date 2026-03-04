@@ -6,6 +6,7 @@ export { WecomConfigSchema, type WecomConfigInput } from "../config-schema.js";
 export {
   DEFAULT_ACCOUNT_ID,
   listWecomAccountIds,
+  resolveWecomAccountConflict,
   resolveDefaultWecomAccountId,
   resolveWecomAccount,
 } from "../accounts.js";

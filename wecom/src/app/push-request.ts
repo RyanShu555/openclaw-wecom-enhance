@@ -31,6 +31,8 @@ export type PushRequestParams = {
   accountId: string;
   toUser: string;
   chatId: string;
+  toParty: string;
+  toTag: string;
   requestToken: string;
 };
 
@@ -40,6 +42,14 @@ export function resolvePushRequestParams(req: IncomingMessage, payload: PushPayl
     accountId: pickString(payload?.accountId, url.searchParams.get("accountId")),
     toUser: pickString(payload?.toUser, url.searchParams.get("toUser")),
     chatId: pickString(payload?.chatId, url.searchParams.get("chatId")),
+    toParty: pickString(
+      Array.isArray(payload?.toParty) ? payload.toParty.join("|") : payload?.toParty,
+      url.searchParams.get("toParty"),
+    ),
+    toTag: pickString(
+      Array.isArray(payload?.toTag) ? payload.toTag.join("|") : payload?.toTag,
+      url.searchParams.get("toTag"),
+    ),
     requestToken: pickString(
       payload?.token,
       url.searchParams.get("token"),

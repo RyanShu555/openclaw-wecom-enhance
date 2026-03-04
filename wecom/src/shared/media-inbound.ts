@@ -23,14 +23,11 @@ import {
   downloadWecomMedia,
   fetchMediaFromUrl,
 } from "../wecom-api.js";
-import { describeImageWithVision, resolveVisionConfig } from "../media-vision.js";
 import {
   extractFileTextPreview,
-  resolveAutoAudioConfig,
   resolveAutoFileConfig,
   resolveAutoVideoConfig,
   summarizeVideoWithVision,
-  transcribeAudioWithOpenAI,
 } from "../media-auto.js";
 
 export type InboundMediaResult = {
@@ -90,14 +87,19 @@ export async function processInboundMedia(params: {
       return buildCachedResult({ cached, msgtype, filename, target });
     }
 
-    // 下载媒体
+    // 下载媒体（优先 URL，失败时回退 mediaId）
     let buffer: Buffer | null = null;
     let contentType = "";
     if (url) {
-      const media = await fetchMediaFromUrl(url, target.account, maxBytes);
-      buffer = media.buffer;
-      contentType = media.contentType;
-    } else if (mediaId) {
+      try {
+        const media = await fetchMediaFromUrl(url, target.account, maxBytes);
+        buffer = media.buffer;
+        contentType = media.contentType;
+      } catch (urlErr) {
+        if (!mediaId) throw urlErr;
+      }
+    }
+    if (!buffer && mediaId) {
       const media = await downloadWecomMedia({ account: target.account, mediaId, maxBytes });
       buffer = media.buffer;
       contentType = media.contentType;
@@ -131,10 +133,10 @@ export async function processInboundMedia(params: {
     await writeFile(tempPath, buffer);
 
     if (msgtype === "image") {
-      return await processImage({ target, buffer, contentType, tempPath, url, cacheKey, storeCache: params.storeCache });
+      return await processImage({ buffer, contentType, tempPath, url, cacheKey, storeCache: params.storeCache });
     }
     if (msgtype === "voice") {
-      return await processVoice({ target, buffer, contentType, tempPath, url, cacheKey, storeCache: params.storeCache });
+      return await processVoice({ buffer, contentType, tempPath, url, cacheKey, storeCache: params.storeCache });
     }
     if (msgtype === "video") {
       return await processVideo({ target, buffer, contentType, tempPath, url, cacheKey, storeCache: params.storeCache });
@@ -161,12 +163,7 @@ async function buildCachedResult(params: {
   const { cached, msgtype, filename } = params;
   const media = { path: cached.path, type: cached.type, mimeType: cached.mimeType, url: cached.url };
 
-  if (msgtype === "image" && cached.summary) {
-    return {
-      text: `[用户发送了一张图片]\n\n[图片识别结果]\n${cached.summary}\n\n请根据识别结果回复用户（无需使用 Read 工具读取图片文件）。`,
-      media,
-    };
-  }
+  if (msgtype === "image") return { text: buildInboundMediaPrompt("image"), media };
   if (msgtype === "file") {
     const safeName = sanitizeFilename(filename || basename(cached.path), "file");
     const fileCfg = resolveAutoFileConfig(params.target.account.config);
@@ -213,7 +210,6 @@ async function processFile(params: {
 }
 
 async function processImage(params: {
-  target: WecomWebhookTarget;
   buffer: Buffer;
   contentType: string;
   tempPath: string;
@@ -221,24 +217,14 @@ async function processImage(params: {
   cacheKey: string | null;
   storeCache: (key: string | null, entry: MediaCacheEntry) => void;
 }): Promise<InboundMediaResult> {
-  const { target, buffer, contentType, tempPath, url, cacheKey, storeCache } = params;
+  const { buffer, contentType, tempPath, url, cacheKey, storeCache } = params;
   const mimeType = contentType || "image/jpeg";
   const media = { path: tempPath, type: "image" as const, mimeType, url };
-  const visionConfig = resolveVisionConfig(target.account.config, target.config);
-  const summary = visionConfig
-    ? await describeImageWithVision({ config: visionConfig, buffer, mimeType })
-    : null;
-  storeCache(cacheKey, { path: tempPath, type: "image", mimeType, url, summary: summary ?? undefined, createdAt: Date.now(), size: buffer.length });
-  return {
-    text: summary
-      ? `[用户发送了一张图片]\n\n[图片识别结果]\n${summary}\n\n请根据识别结果回复用户（无需使用 Read 工具读取图片文件）。`
-      : buildInboundMediaPrompt("image"),
-    media,
-  };
+  storeCache(cacheKey, { path: tempPath, type: "image", mimeType, url, createdAt: Date.now(), size: buffer.length });
+  return { text: buildInboundMediaPrompt("image"), media };
 }
 
 async function processVoice(params: {
-  target: WecomWebhookTarget;
   buffer: Buffer;
   contentType: string;
   tempPath: string;
@@ -246,16 +232,12 @@ async function processVoice(params: {
   cacheKey: string | null;
   storeCache: (key: string | null, entry: MediaCacheEntry) => void;
 }): Promise<InboundMediaResult> {
-  const { target, buffer, contentType, tempPath, url, cacheKey, storeCache } = params;
+  const { buffer, contentType, tempPath, url, cacheKey, storeCache } = params;
   const mimeType = contentType || "audio/amr";
   const media = { path: tempPath, type: "voice" as const, mimeType, url };
   storeCache(cacheKey, { path: tempPath, type: "voice", mimeType, createdAt: Date.now(), size: buffer.length });
-  const audioCfg = resolveAutoAudioConfig(target.account.config);
-  const transcript = audioCfg
-    ? await transcribeAudioWithOpenAI({ cfg: audioCfg, buffer, mimeType })
-    : null;
   return {
-    text: transcript ? `[语音消息转写] ${transcript}` : buildInboundMediaPrompt("voice"),
+    text: buildInboundMediaPrompt("voice"),
     media,
   };
 }

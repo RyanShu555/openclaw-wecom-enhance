@@ -99,6 +99,23 @@ const operationsSchema = z.object({
   logPath: z.string().optional(),
 }).optional();
 
+const botSchema = z.object({
+  token: z.string().optional(),
+  encodingAESKey: z.string().optional(),
+  receiveId: z.string().optional(),
+}).optional();
+
+const agentSchema = z.object({
+  corpId: z.string().optional(),
+  corpSecret: z.string().optional(),
+  agentId: z.union([z.string(), z.number()]).optional(),
+  callbackToken: z.string().optional(),
+  callbackAesKey: z.string().optional(),
+  token: z.string().optional(),
+  encodingAESKey: z.string().optional(),
+  pushToken: z.string().optional(),
+}).optional();
+
 /** 共享的账户级字段 */
 const accountFields = {
   name: z.string().optional(),
@@ -112,6 +129,7 @@ const accountFields = {
   token: z.string().optional(),
   encodingAESKey: z.string().optional(),
   receiveId: z.string().optional(),
+  bot: botSchema,
 
   // Internal app
   corpId: z.string().optional(),
@@ -120,6 +138,7 @@ const accountFields = {
   callbackToken: z.string().optional(),
   callbackAesKey: z.string().optional(),
   pushToken: z.string().optional(),
+  agent: agentSchema,
 
   workspace: z.string().optional(),
 
@@ -137,5 +156,7 @@ const accountSchema = z.object(accountFields);
 export const WecomConfigSchema = ensureJsonSchema(z.object({
   ...accountFields,
   defaultAccount: z.string().optional(),
-  accounts: z.object({}).catchall(accountSchema).optional(),
+  accounts: z.record(z.union([accountSchema, z.string()])).optional(),
 }));
+
+export type WecomConfigInput = z.infer<typeof WecomConfigSchema>;

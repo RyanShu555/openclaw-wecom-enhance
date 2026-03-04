@@ -5,6 +5,7 @@ import { resolveMediaMaxBytes } from "../media-utils.js";
 import { formatErrorDetail } from "../shared/string-utils.js";
 import { dispatchOutboundMedia } from "../shared/dispatch-media.js";
 import { buildAgentContext } from "../shared/agent-context.js";
+import { buildInboundImages } from "../shared/inbound-images.js";
 
 export type AppMediaContext = {
   type: "image" | "voice" | "video" | "file";
@@ -27,9 +28,11 @@ export async function startAgentForApp(params: {
 }): Promise<void> {
   const { target, fromUser, chatId, isGroup, messageText, media } = params;
   const account = target.account;
+  const maxMediaBytes = resolveMediaMaxBytes(target);
 
   const { core, route, storePath, ctxPayload, tableMode } = buildAgentContext({
     target,
+    surface: "app",
     fromUser,
     chatId,
     isGroup,
@@ -51,6 +54,7 @@ export async function startAgentForApp(params: {
     accountId: account.accountId,
     direction: "inbound",
   });
+  const inboundImages = await buildInboundImages(media, maxMediaBytes);
 
   await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,
@@ -63,7 +67,7 @@ export async function startAgentForApp(params: {
             account,
             toUser: fromUser,
             chatId: isGroup ? chatId : undefined,
-            maxBytes: resolveMediaMaxBytes(target),
+            maxBytes: maxMediaBytes,
           });
           if (result.sent) {
             logVerbose(target, `app ${result.type} reply delivered (${info.kind}) to ${fromUser}`);
@@ -94,6 +98,7 @@ export async function startAgentForApp(params: {
     },
     replyOptions: {
       disableBlockStreaming: true,
+      images: inboundImages,
     },
   });
 }

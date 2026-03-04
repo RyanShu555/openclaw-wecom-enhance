@@ -49,7 +49,7 @@ export async function handleWecomPushRequest(params: {
     return true;
   }
 
-  const { accountId, toUser, chatId, requestToken } = resolvePushRequestParams(req, payload);
+  const { accountId, toUser, chatId, toParty, toTag, requestToken } = resolvePushRequestParams(req, payload);
   const target = selectPushTarget(targets, accountId);
   if (!target) {
     replyPushNoMatchingAccount(res);
@@ -67,7 +67,7 @@ export async function handleWecomPushRequest(params: {
     return true;
   }
 
-  if (!toUser && !chatId) {
+  if (!toUser && !chatId && !toParty && !toTag) {
     replyPushMissingRecipient(res);
     return true;
   }
@@ -82,6 +82,8 @@ export async function handleWecomPushRequest(params: {
     payload,
     toUser,
     chatId,
+    toParty,
+    toTag,
   });
 
   target.statusSink?.({ lastOutboundAt: Date.now() });

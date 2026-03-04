@@ -4,6 +4,8 @@ import {
   formatErrorDetail,
 } from "../shared/string-utils.js";
 import { buildAgentContext } from "../shared/agent-context.js";
+import { buildInboundImages } from "../shared/inbound-images.js";
+import { resolveMediaMaxBytes } from "../media-utils.js";
 import { buildInboundBody } from "./media-inbound.js";
 import {
   streams,
@@ -28,9 +30,11 @@ export async function startAgentForStream(params: {
   const chatId = msg.chattype === "group" ? (msg.chatid?.trim() || "unknown") : userid;
   const inbound = await buildInboundBody({ target, msg });
   const rawBody = inbound.text;
+  const inboundImages = await buildInboundImages(inbound.media, resolveMediaMaxBytes(target));
 
   const { core, route, storePath, ctxPayload, tableMode } = buildAgentContext({
     target,
+    surface: "bot",
     fromUser: userid,
     chatId: chatType === "group" ? chatId : undefined,
     isGroup: chatType === "group",
@@ -69,6 +73,9 @@ export async function startAgentForStream(params: {
       onError: (err, info) => {
         target.runtime.error?.(`[${account.accountId}] wecom ${info.kind} reply failed: ${formatErrorDetail(err)}`);
       },
+    },
+    replyOptions: {
+      images: inboundImages,
     },
   });
 

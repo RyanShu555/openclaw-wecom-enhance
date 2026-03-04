@@ -4,8 +4,17 @@
 
 - 插件入口：`wecom/index.ts`
 - HTTP 入口：`wecom/src/monitor.ts`
+- 路由规划：`wecom/src/webhook-routes.ts`（推荐 `/plugins/wecom/bot/{accountId}` 与 `/plugins/wecom/agent/{accountId}`，兼容旧 `/wecom/*`）
 - App 入口壳层：`wecom/src/wecom-app.ts`
 - Bot 入口壳层：`wecom/src/wecom-bot.ts`
+
+## 账号模型与隔离
+
+- 账号解析：`wecom/src/accounts.ts`
+- 支持两种配置写法并存：
+  - 旧平铺：`token/corpId/...`
+  - 新结构：`bot.{token,...}` / `agent.{corpId,...}`
+- 冲突保护：自动检测重复 `bot token`、重复 `corpId+agentId`、重复 `callbackToken+callbackAesKey`，冲突账号不会启动。
 
 ## App 模式模块
 
@@ -14,10 +23,8 @@
 - XML 解析：`wecom/src/app/xml-parser.ts`
 - 解密处理：`wecom/src/app/decrypt-handler.ts`
 - 入站消息解析：`wecom/src/app/inbound-resolver.ts`
-- 文本快捷分支：`wecom/src/app/text-shortcuts.ts`
 - 回复投递：`wecom/src/app/reply-delivery.ts`
 - 主动推送：`wecom/src/app/push-*.ts`
-- 自然语言发文件：`wecom/src/app/file-*.ts`
 
 ## Bot 模式模块
 

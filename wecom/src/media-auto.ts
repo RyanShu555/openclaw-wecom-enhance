@@ -9,16 +9,6 @@ import { num, numOpt, truncateText } from "./shared/string-utils.js";
 
 const DEFAULT_TEXT_EXTENSIONS = ["txt", "md", "log", "csv", "json", "xml", "yaml", "yml"];
 
-export type AutoAudioConfig = {
-  enabled?: boolean;
-  baseUrl?: string;
-  apiKey?: string;
-  model?: string;
-  prompt?: string;
-  timeoutMs?: number;
-  maxBytes?: number;
-};
-
 export type AutoFileConfig = {
   enabled?: boolean;
   textMaxBytes?: number;
@@ -29,15 +19,6 @@ export type AutoFileConfig = {
 export type AutoVideoConfig = {
   enabled?: boolean;
   ffmpegPath?: string;
-  maxBytes?: number;
-};
-
-export type ResolvedAutoAudioConfig = {
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-  prompt?: string;
-  timeoutMs: number;
   maxBytes?: number;
 };
 
@@ -57,23 +38,6 @@ export type ResolvedAutoVideoConfig = {
   maxFrames: number;
   includeAudio: boolean;
 };
-
-export function resolveAutoAudioConfig(cfg: WecomAccountConfig): ResolvedAutoAudioConfig | null {
-  const audio = cfg.media?.auto?.audio;
-  if (!cfg.media?.auto?.enabled || !audio?.enabled) return null;
-  const baseUrl = audio.baseUrl?.trim() || "";
-  const apiKey = audio.apiKey?.trim() || "";
-  const model = audio.model?.trim() || "";
-  if (!baseUrl || !apiKey || !model) return null;
-  return {
-    baseUrl,
-    apiKey,
-    model,
-    prompt: audio.prompt?.trim() || undefined,
-    timeoutMs: num(audio.timeoutMs, 15000),
-    maxBytes: numOpt(audio.maxBytes),
-  };
-}
 
 export function resolveAutoFileConfig(cfg: WecomAccountConfig): ResolvedAutoFileConfig | null {
   const fileCfg = cfg.media?.auto?.file;
@@ -137,43 +101,6 @@ export async function extractFileTextPreview(params: {
   const text = buffer.toString("utf8").trim();
   if (!text) return null;
   return text.slice(0, params.cfg.textMaxChars);
-}
-
-export async function transcribeAudioWithOpenAI(params: {
-  cfg: ResolvedAutoAudioConfig;
-  buffer: Buffer;
-  mimeType?: string;
-}): Promise<string | null> {
-  if (params.cfg.maxBytes && params.buffer.length > params.cfg.maxBytes) return null;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), params.cfg.timeoutMs);
-  try {
-    const form = new FormData();
-    const mimeType = params.mimeType || "audio/amr";
-    form.append("file", new Blob([params.buffer], { type: mimeType }), `audio.${mimeType.split("/")[1] || "amr"}`);
-    form.append("model", params.cfg.model);
-    if (params.cfg.prompt) form.append("prompt", params.cfg.prompt);
-
-    const res = await fetch(`${params.cfg.baseUrl.replace(/\/$/, "")}/audio/transcriptions`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${params.cfg.apiKey}`,
-      },
-      body: form,
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      await res.text().catch(() => {});
-      return null;
-    }
-    const json = await res.json();
-    const text = typeof json.text === "string" ? json.text : typeof json?.data?.text === "string" ? json.data.text : "";
-    return text.trim() || null;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timeout);
-  }
 }
 
 const FFMPEG_TIMEOUT_MS = 60_000;

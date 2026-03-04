@@ -33,7 +33,7 @@ export function replyPushTokenInvalid(res: ServerResponse): void {
 }
 
 export function replyPushMissingRecipient(res: ServerResponse): void {
-  writeJson(res, 400, { ok: false, error: "Missing toUser or chatId" });
+  writeJson(res, 400, { ok: false, error: "Missing recipient: toUser/chatId/toParty/toTag" });
 }
 
 export function replyPushAppNotConfigured(res: ServerResponse): void {

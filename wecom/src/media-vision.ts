@@ -1,5 +1,3 @@
-import type { ClawdbotConfig } from "openclaw/plugin-sdk";
-
 import type { WecomAccountConfig } from "./types.js";
 import { num, numOpt } from "./shared/string-utils.js";
 
@@ -21,48 +19,24 @@ function resolveBaseUrl(raw?: string): string | null {
   return `${value.replace(/\/+$/, "")}/v1`;
 }
 
-function parseProviderModelId(raw?: string): { providerId: string; modelId: string } | null {
-  const value = raw?.trim();
-  if (!value) return null;
-  const idx = value.indexOf("/");
-  if (idx <= 0 || idx >= value.length - 1) return null;
-  return { providerId: value.slice(0, idx), modelId: value.slice(idx + 1) };
-}
-
-function resolveFromOpenClawModels(coreConfig?: ClawdbotConfig): { baseUrl?: string; apiKey?: string; model?: string } {
-  if (!coreConfig) return {};
-  const primary = (coreConfig as any)?.agents?.defaults?.model?.primary as string | undefined;
-  const parsed = parseProviderModelId(primary);
-  if (!parsed) return {};
-  const provider = (coreConfig as any)?.models?.providers?.[parsed.providerId] as any | undefined;
-  if (!provider) return {};
-  return {
-    baseUrl: typeof provider.baseUrl === "string" ? provider.baseUrl : undefined,
-    apiKey: typeof provider.apiKey === "string" ? provider.apiKey : undefined,
-    model: parsed.modelId,
-  };
-}
-
-export function resolveVisionConfig(accountConfig: WecomAccountConfig, coreConfig?: ClawdbotConfig): VisionConfig | null {
+export function resolveVisionConfig(accountConfig: WecomAccountConfig, _coreConfig?: unknown): VisionConfig | null {
   const vision = accountConfig.media?.vision;
   if (!vision?.enabled) return null;
 
-  const inherited = resolveFromOpenClawModels(coreConfig);
   const baseUrl = resolveBaseUrl(
     vision.baseUrl
       || process.env.OPENAI_BASE_URL
       || process.env.OPENAI_API_BASE
       || process.env.OPENAI_ENDPOINT,
   );
-  const resolvedBaseUrl = baseUrl || resolveBaseUrl(inherited.baseUrl);
-  const apiKey = vision.apiKey || process.env.OPENAI_API_KEY || process.env.OPENAI_KEY || inherited.apiKey;
-  if (!resolvedBaseUrl || !apiKey) return null;
+  const apiKey = vision.apiKey || process.env.OPENAI_API_KEY || process.env.OPENAI_KEY;
+  if (!baseUrl || !apiKey) return null;
 
   return {
     enabled: true,
-    baseUrl: resolvedBaseUrl,
+    baseUrl,
     apiKey,
-    model: vision.model || process.env.OPENAI_MODEL || inherited.model || "gpt-4o-mini",
+    model: vision.model || process.env.OPENAI_MODEL || "gpt-4o-mini",
     prompt: vision.prompt
       || "请描述图片内容并尽量提取可见文字。输出简洁中文要点。",
     maxTokens: num(vision.maxTokens, 400),

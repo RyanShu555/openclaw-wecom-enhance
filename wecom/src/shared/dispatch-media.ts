@@ -18,13 +18,15 @@ export type DispatchMediaResult = {
 export async function dispatchOutboundMedia(params: {
   payload: any;
   account: ResolvedWecomAccount;
-  toUser: string;
+  toUser?: string;
   chatId?: string;
+  toParty?: string | string[];
+  toTag?: string | string[];
   maxBytes?: number;
   title?: string;
   description?: string;
 }): Promise<DispatchMediaResult> {
-  const { payload, account, toUser, chatId, maxBytes } = params;
+  const { payload, account, toUser, chatId, toParty, toTag, maxBytes } = params;
   const outbound = await loadOutboundMedia({ payload, account, maxBytes });
   if (!outbound) return { sent: false };
 
@@ -42,7 +44,17 @@ export async function dispatchOutboundMedia(params: {
     ? ((payload as any).description as string | undefined ?? params.description)
     : undefined;
 
-  await sendWecomMedia({ account, toUser, chatId, mediaId, mediaType: outbound.type, title, description });
+  await sendWecomMedia({
+    account,
+    toUser,
+    chatId,
+    toParty,
+    toTag,
+    mediaId,
+    mediaType: outbound.type,
+    title,
+    description,
+  });
 
   return { sent: true, type: outbound.type, label: mediaSentLabel(outbound.type) };
 }

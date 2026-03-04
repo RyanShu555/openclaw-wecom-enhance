@@ -6,6 +6,7 @@ import type { ResolvedWecomAccount } from "./types.js";
 import { handleWecomAppWebhook, handleWecomPushRequest } from "./wecom-app.js";
 import { handleWecomBotWebhook } from "./wecom-bot.js";
 import { readRequestBody } from "./shared/http-utils.js";
+import { normalizeWebhookPath } from "./webhook-routes.js";
 
 const MAX_WEBHOOK_BODY_SIZE = 1024 * 1024;
 
@@ -23,14 +24,6 @@ export type WecomWebhookTarget = {
 };
 
 const webhookTargets = new Map<string, WecomWebhookTarget[]>();
-
-function normalizeWebhookPath(raw: string): string {
-  const trimmed = raw.trim();
-  if (!trimmed) return "/";
-  const withSlash = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-  if (withSlash.length > 1 && withSlash.endsWith("/")) return withSlash.slice(0, -1);
-  return withSlash;
-}
 
 function resolvePath(req: IncomingMessage): string {
   const url = new URL(req.url ?? "/", "http://localhost");
